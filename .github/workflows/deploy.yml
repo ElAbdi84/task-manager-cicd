@@ -45,7 +45,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./frontend
-        run: npm install
+        run: npm ci
 
       - name: Build frontend
         working-directory: ./frontend
@@ -59,7 +59,9 @@ jobs:
       - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/task-manager-key.pem
+          cat > ~/.ssh/task-manager-key.pem <<'EOF'
+          ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EOF
           chmod 400 ~/.ssh/task-manager-key.pem
           ssh-keyscan -H ${{ steps.get-ip.outputs.frontend-ip }} >> ~/.ssh/known_hosts
 

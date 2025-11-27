@@ -59,7 +59,7 @@ jobs:
       - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
-          cat > ~/.ssh/task-manager-key.pem <<'EOF'
+          cat > ~/.ssh/task-manager-key.pem <<EOF
           ${{ secrets.EC2_SSH_PRIVATE_KEY }}
           EOF
           chmod 400 ~/.ssh/task-manager-key.pem

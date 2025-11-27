@@ -1,0 +1,70 @@
+name: CI - Tests
+
+on:
+  push:
+    branches: [main, oumayma]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-cloudformation:
+    name: Validate CloudFormation Templates
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Validate Templates
+        run: |
+          for template in cloudformation/*.yml; do
+            echo "✓ Validating $template"
+            aws cloudformation validate-template --template-body file://$template
+          done
+
+  test-frontend:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm install
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+
+  lint-check:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Check project structure
+        run: |
+          echo "✓ Checking required files..."
+          test -f cloudformation/1-vpc-network.yml
+          test -f cloudformation/2-security-groups.yml
+          test -f cloudformation/3-iam-roles.yml
+          test -f cloudformation/4-compute.yml
+          test -f cloudformation/5-monitoring.yml
+          test -f database/init.sql
+          echo "✅ All files present"

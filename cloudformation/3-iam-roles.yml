@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM Roles et Instance Profiles pour Task Manager'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix
+    Type: String
+    Default: TaskManager
+
+Resources:
+  # ==================== EC2 Instance Role ====================
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-EC2-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # CloudWatch Logs
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        # SSM for Session Manager (optionnel)
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        # Custom policy for CloudWatch metrics
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+        
+        # Custom policy for accessing Parameter Store (passwords, config)
+        - PolicyName: ParameterStoreAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-EC2-Role
+
+  # ==================== Instance Profile ====================
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${EnvironmentName}-EC2-Instance-Profile
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ==================== GitHub Actions Role (Optionnel) ====================
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-GitHub-Actions-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringLike:
+                'token.actions.githubusercontent.com:sub': 'repo:*:*'
+      Policies:
+        # Permissions for CloudFormation
+        - PolicyName: CloudFormationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${EnvironmentName}*'
+        
+        # Permissions for EC2
+        - PolicyName: EC2Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-GitHub-Actions-Role
+
+# ==================== Outputs ====================
+Outputs:
+  EC2InstanceRole:
+    Description: IAM Role for EC2 instances
+    Value: !Ref EC2InstanceRole
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2-Role
+
+  EC2InstanceProfile:
+    Description: Instance Profile for EC2 instances
+    Value: !Ref EC2InstanceProfile
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2-Instance-Profile
+
+  EC2InstanceProfileArn:
+    Description: ARN of Instance Profile
+    Value: !GetAtt EC2InstanceProfile.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-EC2-Instance-Profile-ARN
+
+  GitHubActionsRole:
+    Description: IAM Role for GitHub Actions
+    Value: !Ref GitHubActionsRole
+    Export:
+      Name: !Sub ${EnvironmentName}-GitHub-Actions-Role
+
+  GitHubActionsRoleArn:
+    Description: ARN of GitHub Actions Role
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-GitHub-Actions-Role-ARN

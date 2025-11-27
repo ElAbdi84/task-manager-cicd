@@ -1,0 +1,450 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Instances (Frontend et Backend) pour Task Manager'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix
+    Type: String
+    Default: TaskManager
+
+  KeyName:
+    Description: EC2 Key Pair for SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be an existing EC2 KeyPair
+
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+     
+
+  LatestAmiId:
+    Description: Latest Amazon Linux 2023 AMI
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  DBPassword:
+    Description: MySQL root password
+    Type: String
+    NoEcho: true
+    Default: TaskManager2025!
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: ^[a-zA-Z0-9!@#$%^&*()_+=-]*$
+
+Resources:
+  # ==================== Frontend EC2 Instance ====================
+  FrontendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EC2-Instance-Profile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          GroupSet:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-Frontend-SG-ID
+          SubnetId: !ImportValue
+            Fn::Sub: ${EnvironmentName}-Public-Subnet-ID
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Update system
+          dnf update -y
+          
+          # Install Node.js 20
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+          dnf install -y nodejs
+          
+          # Install Nginx
+          dnf install -y nginx
+          
+          # Install Git
+          dnf install -y git
+          
+          # Install PM2 globally
+          npm install -g pm2
+          
+          # Configure Nginx
+          cat > /etc/nginx/nginx.conf <<'EOF'
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+
+          events {
+              worker_connections 1024;
+          }
+
+          http {
+              log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                                '$status $body_bytes_sent "$http_referer" '
+                                '"$http_user_agent" "$http_x_forwarded_for"';
+
+              access_log  /var/log/nginx/access.log  main;
+
+              sendfile            on;
+              tcp_nopush          on;
+              tcp_nodelay         on;
+              keepalive_timeout   65;
+              types_hash_max_size 4096;
+
+              include             /etc/nginx/mime.types;
+              default_type        application/octet-stream;
+
+              server {
+                  listen       80;
+                  server_name  _;
+                  root         /var/www/html;
+
+                  location / {
+                      try_files $uri $uri/ /index.html;
+                  }
+
+                  location /api/ {
+                      proxy_pass http://${BackendInstance.PrivateIp}:5000/api/;
+                      proxy_http_version 1.1;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  }
+              }
+          }
+          EOF
+          
+          # Create web directory
+          mkdir -p /var/www/html 
+          
+          # Create a simple index page
+          cat > /var/www/html/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Task Manager - Frontend</title>
+          </head>
+          <body>
+              <h1>Task Manager Frontend</h1>
+              <p>Frontend is ready! Deploy your React app here.</p>
+          </body>
+          </html>
+          EOF
+          
+          # Set permissions
+          chown -R nginx:nginx /var/www/html
+          
+          # Start and enable Nginx
+          systemctl start nginx
+          systemctl enable nginx
+          
+          # Install CloudWatch agent
+          wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          rpm -U ./amazon-cloudwatch-agent.rpm
+          
+          # Create CloudWatch config
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<'EOF'
+          {
+            "metrics": {
+              "namespace": "TaskManager/Frontend",
+              "metrics_collected": {
+                "cpu": {
+                  "measurement": [{"name": "cpu_usage_idle", "rename": "CPU_IDLE", "unit": "Percent"}],
+                  "totalcpu": false
+                },
+                "mem": {
+                  "measurement": [{"name": "mem_used_percent", "rename": "MEMORY_USED", "unit": "Percent"}]
+                }
+              }
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/nginx/access.log",
+                      "log_group_name": "/aws/ec2/taskmanager/frontend",
+                      "log_stream_name": "nginx-access"
+                    },
+                    {
+                      "file_path": "/var/log/nginx/error.log",
+                      "log_group_name": "/aws/ec2/taskmanager/frontend",
+                      "log_stream_name": "nginx-error"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+          
+          # Start CloudWatch agent
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+            -a fetch-config \
+            -m ec2 \
+            -s \
+            -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+          
+          # Signal completion
+          echo "Frontend instance setup completed!"
+      
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Frontend-EC2
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ==================== Backend EC2 Instance ====================
+  BackendInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !ImportValue
+        Fn::Sub: ${EnvironmentName}-EC2-Instance-Profile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: '0'
+          GroupSet:
+            - !ImportValue
+              Fn::Sub: ${EnvironmentName}-Backend-SG-ID
+          SubnetId: !ImportValue
+            Fn::Sub: ${EnvironmentName}-Private-Subnet-ID
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Update system
+          dnf update -y
+          
+          # Install Node.js 20
+          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+          dnf install -y nodejs
+          
+          # Install MariaDB (MySQL)
+          dnf install -y mariadb105-server mariadb105
+          
+          # Install Git
+          dnf install -y git
+          
+          # Install PM2 globally
+          npm install -g pm2
+          
+          # Start and enable MariaDB
+          systemctl start mariadb
+          systemctl enable mariadb
+          
+          # Secure MySQL installation
+          mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DBPassword}';"
+          mysql -u root -p'${DBPassword}' -e "DELETE FROM mysql.user WHERE User='';"
+          mysql -u root -p'${DBPassword}' -e "DROP DATABASE IF EXISTS test;"
+          mysql -u root -p'${DBPassword}' -e "FLUSH PRIVILEGES;"
+          
+          # Create database and user
+          mysql -u root -p'${DBPassword}' <<EOF
+          CREATE DATABASE IF NOT EXISTS taskmanager;
+          CREATE USER IF NOT EXISTS 'taskuser'@'localhost' IDENTIFIED BY '${DBPassword}';
+          GRANT ALL PRIVILEGES ON taskmanager.* TO 'taskuser'@'localhost';
+          FLUSH PRIVILEGES;
+          EOF
+          
+          # Create tasks table
+          mysql -u root -p'${DBPassword}' taskmanager <<EOF
+          CREATE TABLE IF NOT EXISTS tasks (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              title VARCHAR(255) NOT NULL,
+              description TEXT,
+              completed BOOLEAN DEFAULT FALSE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_completed (completed),
+              INDEX idx_created_at (created_at)
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+          
+          -- Insert sample data
+          INSERT INTO tasks (title, description, completed) VALUES
+          ('Setup AWS Infrastructure', 'Create VPC, subnets, and EC2 instances', true),
+          ('Deploy Application', 'Deploy frontend and backend applications', false),
+          ('Configure Monitoring', 'Setup CloudWatch and SNS alerts', false);
+          EOF
+          
+          # Create application directory
+          mkdir -p /opt/taskmanager
+          cd /opt/taskmanager
+          
+          # Create a simple Express app
+          cat > package.json <<'EOF'
+          {
+            "name": "taskmanager-backend",
+            "version": "1.0.0",
+            "main": "index.js",
+            "scripts": {
+              "start": "node index.js"
+            },
+            "dependencies": {
+              "express": "^4.18.2",
+              "mysql2": "^3.6.5",
+              "cors": "^2.8.5"
+            }
+          }
+          EOF
+          
+          # Install dependencies
+          npm install
+          
+          # Create Express server
+          cat > index.js <<'EOFJS'
+          const express = require('express');
+          const mysql = require('mysql2/promise');
+          const cors = require('cors');
+          
+          const app = express();
+          const PORT = 5000;
+          
+          app.use(cors());
+          app.use(express.json());
+          
+          // Database connection pool
+          const pool = mysql.createPool({
+            host: 'localhost',
+            user: 'taskuser',
+            password: '${DBPassword}',
+            database: 'taskmanager',
+            waitForConnections: true,
+            connectionLimit: 10
+          });
+          
+          // Health check
+          app.get('/api/health', (req, res) => {
+            res.json({ status: 'OK', timestamp: new Date() });
+          });
+          
+          // Get all tasks
+          app.get('/api/tasks', async (req, res) => {
+            try {
+              const [rows] = await pool.query('SELECT * FROM tasks ORDER BY created_at DESC');
+              res.json(rows);
+            } catch (error) {
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          // Get task by ID
+          app.get('/api/tasks/:id', async (req, res) => {
+            try {
+              const [rows] = await pool.query('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
+              if (rows.length === 0) {
+                return res.status(404).json({ error: 'Task not found' });
+              }
+              res.json(rows[0]);
+            } catch (error) {
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          // Create task
+          app.post('/api/tasks', async (req, res) => {
+            try {
+              const { title, description, completed } = req.body;
+              const [result] = await pool.query(
+                'INSERT INTO tasks (title, description, completed) VALUES (?, ?, ?)',
+                [title, description || '', completed || false]
+              );
+              res.status(201).json({ id: result.insertId, title, description, completed });
+            } catch (error) {
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          // Update task
+          app.put('/api/tasks/:id', async (req, res) => {
+            try {
+              const { title, description, completed } = req.body;
+              await pool.query(
+                'UPDATE tasks SET title = ?, description = ?, completed = ? WHERE id = ?',
+                [title, description, completed, req.params.id]
+              );
+              res.json({ id: req.params.id, title, description, completed });
+            } catch (error) {
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          // Delete task
+          app.delete('/api/tasks/:id', async (req, res) => {
+            try {
+              await pool.query('DELETE FROM tasks WHERE id = ?', [req.params.id]);
+              res.json({ message: 'Task deleted' });
+            } catch (error) {
+              res.status(500).json({ error: error.message });
+            }
+          });
+          
+          app.listen(PORT, () => {
+            console.log(`Backend server running on port ${PORT}`);
+          });
+          EOFJS
+          
+          # Start application with PM2
+          pm2 start index.js --name taskmanager-backend
+          pm2 save
+          pm2 startup systemd -u root --hp /root
+          
+          # Install CloudWatch agent
+          wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          rpm -U ./amazon-cloudwatch-agent.rpm
+          
+          # Signal completion
+          echo "Backend instance setup completed!"
+      
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Backend-EC2
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+# ==================== Outputs ====================
+Outputs:
+  FrontendInstanceId:
+    Description: Frontend EC2 Instance ID
+    Value: !Ref FrontendInstance
+    Export:
+      Name: !Sub ${EnvironmentName}-Frontend-Instance-ID
+
+  FrontendPublicIP:
+    Description: Frontend Public IP Address
+    Value: !GetAtt FrontendInstance.PublicIp
+    Export:
+      Name: !Sub ${EnvironmentName}-Frontend-Public-IP
+
+  FrontendPrivateIP:
+    Description: Frontend Private IP Address
+    Value: !GetAtt FrontendInstance.PrivateIp
+    Export:
+      Name: !Sub ${EnvironmentName}-Frontend-Private-IP
+
+  BackendInstanceId:
+    Description: Backend EC2 Instance ID
+    Value: !Ref BackendInstance
+    Export:
+      Name: !Sub ${EnvironmentName}-Backend-Instance-ID
+
+  BackendPrivateIP:
+    Description: Backend Private IP Address
+    Value: !GetAtt BackendInstance.PrivateIp
+    Export:
+      Name: !Sub ${EnvironmentName}-Backend-Private-IP
+
+  ApplicationURL:
+    Description: URL to access the application
+    Value: !Sub 'http://${FrontendInstance.PublicIp}'
+    Export:
+      Name: !Sub ${EnvironmentName}-Application-URL

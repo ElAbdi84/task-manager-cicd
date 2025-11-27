@@ -1,0 +1,202 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Monitoring et SNS Alerts pour Task Manager'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix
+    Type: String
+    Default: TaskManager
+
+  AlertEmail:
+    Description: Email address for CloudWatch alarms
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    ConstraintDescription: Must be a valid email address
+
+Resources:
+  # ==================== SNS Topic ====================
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${EnvironmentName}-Alerts
+      DisplayName: Task Manager Alerts
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Alert-Topic
+
+  # ==================== CloudWatch Log Groups ====================
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ec2/taskmanager/frontend
+      RetentionInDays: 7
+
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ec2/taskmanager/backend
+      RetentionInDays: 7
+
+  # ==================== Frontend Alarms ====================
+  FrontendCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-Frontend-High-CPU
+      AlarmDescription: Alert when frontend CPU exceeds 70%
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue
+            Fn::Sub: ${EnvironmentName}-Frontend-Instance-ID
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  FrontendStatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-Frontend-Status-Check-Failed
+      AlarmDescription: Alert when frontend instance status check fails
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue
+            Fn::Sub: ${EnvironmentName}-Frontend-Instance-ID
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: breaching
+
+  # ==================== Backend Alarms ====================
+  BackendCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-Backend-High-CPU
+      AlarmDescription: Alert when backend CPU exceeds 70%
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue
+            Fn::Sub: ${EnvironmentName}-Backend-Instance-ID
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  BackendStatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${EnvironmentName}-Backend-Status-Check-Failed
+      AlarmDescription: Alert when backend instance status check fails
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !ImportValue
+            Fn::Sub: ${EnvironmentName}-Backend-Instance-ID
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: breaching
+
+  # ==================== CloudWatch Dashboard ====================
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${EnvironmentName}-Dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/EC2", "CPUUtilization", {"stat": "Average", "label": "Frontend CPU"}],
+                  ["...", {"stat": "Average", "label": "Backend CPU"}]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "EC2 CPU Utilization",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/EC2", "StatusCheckFailed", {"stat": "Maximum", "label": "Frontend Status"}],
+                  ["...", {"stat": "Maximum", "label": "Backend Status"}]
+                ],
+                "period": 60,
+                "stat": "Maximum",
+                "region": "${AWS::Region}",
+                "title": "Instance Status Checks",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 1
+                  }
+                }
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/ec2/taskmanager/frontend'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Frontend Recent Logs"
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/ec2/taskmanager/backend'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Backend Recent Logs"
+              }
+            }
+          ]
+        }
+
+# ==================== Outputs ====================
+Outputs:
+  SNSTopic:
+    Description: SNS Topic ARN for alerts
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub ${EnvironmentName}-SNS-Topic-ARN
+
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${EnvironmentName}-Dashboard'
+    Export:
+      Name: !Sub ${EnvironmentName}-Dashboard-URL

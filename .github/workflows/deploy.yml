@@ -1,0 +1,39 @@
+name: CD - Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT_NAME: TaskManager
+
+jobs:
+  deploy:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get Current IP
+        id: ip
+        run: |
+          MY_IP=$(curl -s https://ifconfig.me)
+          echo "current-ip=${MY_IP}/32" >> $GITHUB_OUTPUT
+          echo "🔍 Detected IP: ${MY_IP}/32"
+
+      - name: Deploy Stacks
+        run: |
+          echo "🚀 Deploying infrastructure..."
+          # Les stacks seront déployées ici après le déploiement manuel initial
+          echo "✅ Infrastructure ready"

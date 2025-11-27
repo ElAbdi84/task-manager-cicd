@@ -1,189 +1,223 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-const API_BASE_URL = '/api';
+// Détecter l'environnement
+const API_URL = window.location.hostname === 'localhost' 
+  ? 'http://3.215.178.197/api'  // En dev local, pointer vers EC2
+  : '/api';  // En production, utiliser le proxy Nginx
 
 function App() {
-    const [tasks, setTasks] = useState([]);
-    const [newTask, setNewTask] = useState('');
-    const [newDescription, setNewDescription] = useState('');
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [formData, setFormData] = useState({
+    title: '',
+    description: '',
+  });
 
-    // Fetch tasks from API
-    useEffect(() => {
-        fetchTasks();
-    }, []);
+  useEffect(() => {
+    fetchTasks();
+  }, []);
 
-    const fetchTasks = async () => {
-        try {
-            setLoading(true);
-            const response = await fetch(`${API_BASE_URL}/tasks`);
-            if (!response.ok) throw new Error('Failed to fetch tasks');
-            const data = await response.json();
-            setTasks(data);
-            setError(null);
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
+  const fetchTasks = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${API_URL}/tasks`);
+      if (!response.ok) throw new Error('Failed to fetch tasks');
+      const data = await response.json();
+      setTasks(data);
+      setError(null);
+    } catch (err) {
+      setError('Impossible de charger les tâches. Vérifiez votre connexion.');
+      console.error('Error fetching tasks:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    const addTask = async (e) => {
-        e.preventDefault();
-        if (!newTask.trim()) return;
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.title.trim()) {
+      setError('Le titre est obligatoire');
+      return;
+    }
 
-        try {
-            setLoading(true);
-            const response = await fetch(`${API_BASE_URL}/tasks`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    title: newTask,
-                    description: newDescription,
-                    completed: false
-                })
-            });
+    try {
+      const response = await fetch(`${API_URL}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: formData.title,
+          description: formData.description,
+          completed: false,
+        }),
+      });
 
-            if (!response.ok) throw new Error('Failed to add task');
+      if (!response.ok) throw new Error('Failed to create task');
 
-            setNewTask('');
-            setNewDescription('');
-            fetchTasks();
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
+      setFormData({ title: '', description: '' });
+      fetchTasks();
+      setError(null);
+    } catch (err) {
+      setError('Impossible de créer la tâche');
+      console.error('Error creating task:', err);
+    }
+  };
 
-    const toggleTask = async (id, completed) => {
-        try {
-            const task = tasks.find(t => t.id === id);
-            const response = await fetch(`${API_BASE_URL}/tasks/${id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    ...task,
-                    completed: !completed
-                })
-            });
+  const toggleComplete = async (task) => {
+    try {
+      const response = await fetch(`${API_URL}/tasks/${task.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...task,
+          completed: !task.completed,
+        }),
+      });
 
-            if (!response.ok) throw new Error('Failed to update task');
-            fetchTasks();
-        } catch (err) {
-            setError(err.message);
-        }
-    };
+      if (!response.ok) throw new Error('Failed to update task');
+      fetchTasks();
+    } catch (err) {
+      setError('Impossible de mettre à jour la tâche');
+      console.error('Error updating task:', err);
+    }
+  };
 
-    const deleteTask = async (id) => {
-        if (!window.confirm('Are you sure you want to delete this task?')) return;
+  const deleteTask = async (id) => {
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer cette tâche ?')) {
+      return;
+    }
 
-        try {
-            const response = await fetch(`${API_BASE_URL}/tasks/${id}`, {
-                method: 'DELETE'
-            });
+    try {
+      const response = await fetch(`${API_URL}/tasks/${id}`, {
+        method: 'DELETE',
+      });
 
-            if (!response.ok) throw new Error('Failed to delete task');
-            fetchTasks();
-        } catch (err) {
-            setError(err.message);
-        }
-    };
+      if (!response.ok) throw new Error('Failed to delete task');
+      fetchTasks();
+    } catch (err) {
+      setError('Impossible de supprimer la tâche');
+      console.error('Error deleting task:', err);
+    }
+  };
 
-    return (
-        <div className="App">
-            <div className="container">
-                <header className="header">
-                    <h1>📝 Task Manager</h1>
-                    <p className="subtitle">AWS CI/CD Project - Full Stack Application</p>
-                </header>
+  const handleChange = (e) => {
+    setFormData({
+      ...formData,
+      [e.target.name]: e.target.value,
+    });
+  };
 
-                {error && (
-                    <div className="error-banner">
-                        <strong>Error:</strong> {error}
-                        <button onClick={() => setError(null)}>×</button>
-                    </div>
-                )}
+  return (
+    <div className="App">
+      <header className="app-header">
+        <h1>⚡ Task Manager Pro</h1>
+        <p>Gérez vos tâches avec style et efficacité</p>
+      </header>
 
-                <div className="card">
-                    <h2>Add New Task</h2>
-                    <form onSubmit={addTask} className="task-form">
-                        <input
-                            type="text"
-                            placeholder="Task title"
-                            value={newTask}
-                            onChange={(e) => setNewTask(e.target.value)}
-                            className="input"
-                            disabled={loading}
-                        />
-                        <textarea
-                            placeholder="Description (optional)"
-                            value={newDescription}
-                            onChange={(e) => setNewDescription(e.target.value)}
-                            className="textarea"
-                            disabled={loading}
-                        />
-                        <button type="submit" className="btn btn-primary" disabled={loading}>
-                            {loading ? 'Adding...' : '+ Add Task'}
-                        </button>
-                    </form>
-                </div>
-
-                <div className="card">
-                    <div className="card-header">
-                        <h2>Tasks ({tasks.length})</h2>
-                        <button onClick={fetchTasks} className="btn btn-secondary" disabled={loading}>
-                            🔄 Refresh
-                        </button>
-                    </div>
-
-                    {loading && tasks.length === 0 ? (
-                        <div className="loading">Loading tasks...</div>
-                    ) : tasks.length === 0 ? (
-                        <div className="empty-state">
-                            <p>No tasks yet. Add your first task above!</p>
-                        </div>
-                    ) : (
-                        <ul className="task-list">
-                            {tasks.map((task) => (
-                                <li key={task.id} className={`task-item ${task.completed ? 'completed' : ''}`}>
-                                    <div className="task-content">
-                                        <input
-                                            type="checkbox"
-                                            checked={task.completed}
-                                            onChange={() => toggleTask(task.id, task.completed)}
-                                            className="checkbox"
-                                        />
-                                        <div className="task-details">
-                                            <h3 className="task-title">{task.title}</h3>
-                                            {task.description && (
-                                                <p className="task-description">{task.description}</p>
-                                            )}
-                                            <span className="task-date">
-                                                Created: {new Date(task.created_at).toLocaleDateString()}
-                                            </span>
-                                        </div>
-                                    </div>
-                                    <button
-                                        onClick={() => deleteTask(task.id)}
-                                        className="btn btn-danger"
-                                    >
-                                        🗑️
-                                    </button>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </div>
-
-                <footer className="footer">
-                    <p>Deployed on AWS EC2 | Managed by CloudFormation | CI/CD with GitHub Actions</p>
-                </footer>
-            </div>
+      {error && (
+        <div className="error-message">
+          {error}
         </div>
-    );
+      )}
+
+      <div className="task-form">
+        <h2>Nouvelle Tâche</h2>
+        <form onSubmit={handleSubmit}>
+          <div className="form-group">
+            <label htmlFor="title">Titre *</label>
+            <input
+              id="title"
+              type="text"
+              name="title"
+              value={formData.title}
+              onChange={handleChange}
+              placeholder="Entrez le titre de la tâche..."
+              required
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="description">Description</label>
+            <textarea
+              id="description"
+              name="description"
+              value={formData.description}
+              onChange={handleChange}
+              placeholder="Ajoutez des détails (optionnel)..."
+            />
+          </div>
+
+          <button type="submit" className="btn btn-primary">
+            ➕ Ajouter la tâche
+          </button>
+        </form>
+      </div>
+
+      <div className="tasks-section">
+        {loading ? (
+          <div className="loading">Chargement des tâches</div>
+        ) : tasks.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-state-icon">📋</div>
+            <h3>Aucune tâche pour le moment</h3>
+            <p>Créez votre première tâche pour commencer !</p>
+          </div>
+        ) : (
+          <div className="task-list">
+            {tasks.map((task) => (
+              <div
+                key={task.id}
+                className={`task-item ${task.completed ? 'completed' : ''}`}
+              >
+                <div className="task-header">
+                  <input
+                    type="checkbox"
+                    className="task-checkbox"
+                    checked={task.completed}
+                    onChange={() => toggleComplete(task)}
+                  />
+                  <h3>{task.title}</h3>
+                </div>
+
+                <div className="task-body">
+                  {task.description && <p>{task.description}</p>}
+                  <div className="task-meta">
+                    <span>
+                      {task.completed ? '✅ Terminée' : '⏳ En cours'}
+                    </span>
+                    {' • '}
+                    <span>
+                      {new Date(task.created_at).toLocaleDateString('fr-FR', {
+                        day: 'numeric',
+                        month: 'long',
+                        year: 'numeric',
+                      })}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="task-actions">
+                  <button
+                    onClick={() => toggleComplete(task)}
+                    className="btn btn-secondary"
+                  >
+                    {task.completed ? '↩️ Réactiver' : '✓ Terminer'}
+                  </button>
+                  <button
+                    onClick={() => deleteTask(task.id)}
+                    className="btn btn-danger"
+                  >
+                    🗑️ Supprimer
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default App;

@@ -73,34 +73,33 @@ jobs:
           echo "🔑 Setting up SSH key..."
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          
-          # Write SSH key using printf to preserve formatting
-          printf '%s\n' "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/task-manager-key.pem
-          
-          # Set correct permissions
+
+          # Write SSH private key WITHOUT printing anything
+          printf "%s\n" "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/task-manager-key.pem
+
           chmod 600 ~/.ssh/task-manager-key.pem
-          
-          # Debug: Show first and last line (without revealing the key)
-          echo "Key file created. First line:"
-          head -1 ~/.ssh/task-manager-key.pem
-          echo "Last line:"
-          tail -1 ~/.ssh/task-manager-key.pem
-          
-          # Verify key format
-          if ! grep -q "BEGIN.*PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
-            echo "❌ Invalid SSH key format"
+
+          # Validate without printing
+          if [ ! -s ~/.ssh/task-manager-key.pem ]; then
+            echo "❌ SSH key file is empty!"
             exit 1
           fi
-          
-          if ! grep -q "END.*PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
-            echo "❌ SSH key is incomplete (missing END marker)"
+
+          if ! grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
+            echo "❌ Missing BEGIN marker"
             exit 1
           fi
-          
-          # Add host to known_hosts
+
+          if ! grep -q "END RSA PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
+             echo "❌ Missing END marker"
+             exit 1
+          fi
+
+          # Add host
           ssh-keyscan -H ${{ steps.get-ip.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
-          
+
           echo "✅ SSH key configured successfully"
+
 
       - name: Test SSH Connection
         run: |

@@ -35,78 +35,193 @@ jobs:
       - name: Get Frontend IP
         id: get-ip
         run: |
+          echo "🔍 Fetching Frontend IP from CloudFormation..."
           FRONTEND_IP=$(aws cloudformation describe-stacks \
             --stack-name TaskManager-compute \
             --region ${{ env.AWS_REGION }} \
             --query 'Stacks[0].Outputs[?OutputKey==`FrontendPublicIP`].OutputValue' \
             --output text)
-          echo "frontend-ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
-          echo "🌐 Frontend IP: $FRONTEND_IP"
+          
+          if [ -z "$FRONTEND_IP" ]; then
+            echo "❌ Failed to get Frontend IP"
+            exit 1
+          fi
+          
+          echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
+          echo "✅ Frontend IP: $FRONTEND_IP"
 
       - name: Install dependencies
         working-directory: ./frontend
-        run: npm install
+        run: |
+          echo "📦 Installing dependencies..."
+          npm install
+          echo "✅ Dependencies installed"
 
       - name: Build frontend
         working-directory: ./frontend
         env:
-          REACT_APP_API_URL: http://${{ steps.get-ip.outputs.frontend-ip }}/api
+          REACT_APP_API_URL: http://${{ steps.get-ip.outputs.frontend_ip }}/api
         run: |
           echo "🔨 Building frontend..."
+          echo "API URL: $REACT_APP_API_URL"
           npm run build
           echo "✅ Build completed"
+          ls -la build/
 
       - name: Setup SSH Key
         run: |
+          echo "🔑 Setting up SSH key..."
           mkdir -p ~/.ssh
-          cat > ~/.ssh/task-manager-key.pem <<EOF
-          ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          EOF
-          chmod 400 ~/.ssh/task-manager-key.pem
-          ssh-keyscan -H ${{ steps.get-ip.outputs.frontend-ip }} >> ~/.ssh/known_hosts
+          chmod 700 ~/.ssh
+          
+          # Write SSH key using printf to preserve formatting
+          printf '%s\n' "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/task-manager-key.pem
+          
+          # Set correct permissions
+          chmod 600 ~/.ssh/task-manager-key.pem
+          
+          # Debug: Show first and last line (without revealing the key)
+          echo "Key file created. First line:"
+          head -1 ~/.ssh/task-manager-key.pem
+          echo "Last line:"
+          tail -1 ~/.ssh/task-manager-key.pem
+          
+          # Verify key format
+          if ! grep -q "BEGIN.*PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
+            echo "❌ Invalid SSH key format"
+            exit 1
+          fi
+          
+          if ! grep -q "END.*PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
+            echo "❌ SSH key is incomplete (missing END marker)"
+            exit 1
+          fi
+          
+          # Add host to known_hosts
+          ssh-keyscan -H ${{ steps.get-ip.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
+          
+          echo "✅ SSH key configured successfully"
+
+      - name: Test SSH Connection
+        run: |
+          echo "🧪 Testing SSH connection..."
+          
+          # Test with verbose output for debugging
+          ssh -i ~/.ssh/task-manager-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -v \
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} \
+            "echo '✅ SSH connection successful'; hostname; whoami" 2>&1 | tail -20
 
       - name: Deploy to EC2
         run: |
           echo "🚀 Deploying to EC2..."
           
           # Create temp directory on EC2
-          ssh -i ~/.ssh/task-manager-key.pem ec2-user@${{ steps.get-ip.outputs.frontend-ip }} \
-            "mkdir -p /tmp/react-build"
+          ssh -i ~/.ssh/task-manager-key.pem \
+            -o StrictHostKeyChecking=no \
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} \
+            "sudo mkdir -p /tmp/react-build && sudo chown ec2-user:ec2-user /tmp/react-build"
           
-          # Copy build files
-          scp -i ~/.ssh/task-manager-key.pem -r frontend/build/* \
-            ec2-user@${{ steps.get-ip.outputs.frontend-ip }}:/tmp/react-build/
+          # Copy build files with verbose output
+          echo "📤 Copying build files..."
+          scp -i ~/.ssh/task-manager-key.pem \
+            -o StrictHostKeyChecking=no \
+            -r frontend/build/* \
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }}:/tmp/react-build/
           
-          # Deploy files
-          ssh -i ~/.ssh/task-manager-key.pem ec2-user@${{ steps.get-ip.outputs.frontend-ip }} \
-            "sudo rm -rf /var/www/html/* && \
-             sudo cp -r /tmp/react-build/* /var/www/html/ && \
-             sudo chown -R nginx:nginx /var/www/html && \
-             sudo systemctl reload nginx && \
-             rm -rf /tmp/react-build"
+          # Deploy files and restart nginx
+          echo "📦 Installing files..."
+          ssh -i ~/.ssh/task-manager-key.pem \
+            -o StrictHostKeyChecking=no \
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} << 'ENDSSH'
+            set -e
+            
+            # Backup current deployment
+            if [ -d /var/www/html ] && [ "$(ls -A /var/www/html 2>/dev/null)" ]; then
+              echo "📦 Creating backup..."
+              sudo tar -czf /tmp/html-backup-$(date +%Y%m%d-%H%M%S).tar.gz -C /var/www/html . 2>/dev/null || true
+            fi
+            
+            # Deploy new files
+            echo "🔄 Deploying new files..."
+            sudo rm -rf /var/www/html/*
+            sudo cp -r /tmp/react-build/* /var/www/html/
+            sudo chown -R nginx:nginx /var/www/html
+            sudo chmod -R 755 /var/www/html
+            
+            # Verify files
+            echo "✅ Files deployed:"
+            ls -la /var/www/html/ | head -10
+            
+            # Test nginx config
+            sudo nginx -t
+            
+            # Reload nginx
+            echo "🔄 Reloading Nginx..."
+            sudo systemctl reload nginx
+            
+            # Cleanup
+            rm -rf /tmp/react-build
+            
+            echo "✅ Deployment completed!"
+          ENDSSH
           
-          echo "✅ Deployment completed!"
+          echo "🎉 Deployment successful!"
 
       - name: Verify Deployment
         run: |
           echo "🔍 Verifying deployment..."
           sleep 5
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ip.outputs.frontend-ip }})
+          
+          # Test main page
+          echo "Testing main page..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ip.outputs.frontend_ip }})
+          
           if [ "$STATUS" -eq 200 ]; then
             echo "✅ Frontend is accessible (HTTP $STATUS)"
           else
             echo "❌ Frontend returned HTTP $STATUS"
+            echo "Trying to get more info..."
+            curl -I http://${{ steps.get-ip.outputs.frontend_ip }} || true
             exit 1
           fi
+          
+          # Test API proxy
+          echo ""
+          echo "Testing API endpoint..."
+          API_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ip.outputs.frontend_ip }}/api/health || echo "000")
+          echo "API Health Check: HTTP $API_STATUS"
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo ""
+          echo "📊 ================================"
+          echo "📊 DEPLOYMENT SUMMARY"
+          echo "📊 ================================"
+          echo ""
+          echo "🌐 Frontend URL: http://${{ steps.get-ip.outputs.frontend_ip }}"
+          echo "🔧 API Health: http://${{ steps.get-ip.outputs.frontend_ip }}/api/health"
+          echo "📦 Stack Name: TaskManager-compute"
+          echo "🌍 Region: ${{ env.AWS_REGION }}"
+          echo ""
 
       - name: Notify Success
         if: success()
         run: |
-          echo "🎉 Deployment successful!"
-          echo "🌐 Frontend URL: http://${{ steps.get-ip.outputs.frontend-ip }}"
+          echo "🎉 ================================"
+          echo "🎉 DEPLOYMENT SUCCESSFUL!"
+          echo "🎉 ================================"
+          echo ""
+          echo "✅ All systems operational"
 
       - name: Notify Failure
         if: failure()
         run: |
-          echo "❌ Deployment failed!"
-          echo "Check the logs above for details."
+          echo "❌ ================================"
+          echo "❌ DEPLOYMENT FAILED!"
+          echo "❌ ================================"
+          echo ""
+          echo "Please check the logs above for details."

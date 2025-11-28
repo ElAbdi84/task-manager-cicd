@@ -74,31 +74,19 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # Write SSH private key WITHOUT printing anything
-          printf "%s\n" "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/task-manager-key.pem
+          # Decode base64 back into real key
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}" | base64 -d > ~/.ssh/task-manager-key.pem
 
           chmod 600 ~/.ssh/task-manager-key.pem
 
-          # Validate without printing
-          if [ ! -s ~/.ssh/task-manager-key.pem ]; then
-            echo "❌ SSH key file is empty!"
-            exit 1
-          fi
-
+          # Validate BEGIN / END markers
           if ! grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
-            echo "❌ Missing BEGIN marker"
-            exit 1
+          echo "❌ SSH key decode failure"
+          exit 1
           fi
 
-          if ! grep -q "END RSA PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
-             echo "❌ Missing END marker"
-             exit 1
-          fi
+          echo "✅ SSH key restored and valid"
 
-          # Add host
-          ssh-keyscan -H ${{ steps.get-ip.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
-
-          echo "✅ SSH key configured successfully"
 
 
       - name: Test SSH Connection

@@ -45,12 +45,10 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./frontend
-        run: npm install
+        run: npm ci
 
       - name: Build frontend
         working-directory: ./frontend
-        env:
-          REACT_APP_API_URL: http://${{ steps.get-ip.outputs.frontend-ip }}/api
         run: |
           echo "🔨 Building frontend..."
           npm run build
@@ -59,9 +57,7 @@ jobs:
       - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
-          cat > ~/.ssh/task-manager-key.pem <<EOF
-          ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          EOF
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" | base64 -d > ~/.ssh/task-manager-key.pem
           chmod 400 ~/.ssh/task-manager-key.pem
           ssh-keyscan -H ${{ steps.get-ip.outputs.frontend-ip }} >> ~/.ssh/known_hosts
 
@@ -69,15 +65,12 @@ jobs:
         run: |
           echo "🚀 Deploying to EC2..."
           
-          # Create temp directory on EC2
           ssh -i ~/.ssh/task-manager-key.pem ec2-user@${{ steps.get-ip.outputs.frontend-ip }} \
             "mkdir -p /tmp/react-build"
           
-          # Copy build files
           scp -i ~/.ssh/task-manager-key.pem -r frontend/build/* \
             ec2-user@${{ steps.get-ip.outputs.frontend-ip }}:/tmp/react-build/
           
-          # Deploy files
           ssh -i ~/.ssh/task-manager-key.pem ec2-user@${{ steps.get-ip.outputs.frontend-ip }} \
             "sudo rm -rf /var/www/html/* && \
              sudo cp -r /tmp/react-build/* /var/www/html/ && \
@@ -104,9 +97,3 @@ jobs:
         run: |
           echo "🎉 Deployment successful!"
           echo "🌐 Frontend URL: http://${{ steps.get-ip.outputs.frontend-ip }}"
-
-      - name: Notify Failure
-        if: failure()
-        run: |
-          echo "❌ Deployment failed!"
-          echo "Check the logs above for details."

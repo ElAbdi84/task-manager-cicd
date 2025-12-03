@@ -49,6 +49,40 @@ Resources:
                   - ssm:GetParameters
                   - ssm:GetParametersByPath
                 Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${EnvironmentName}/*'
+        
+        # ECR Access - NOUVEAU
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Permission pour s'authentifier à ECR
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              # Permissions pour pull les images Docker
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                Resource: 
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/taskmanager-frontend'
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/taskmanager-backend'
+        
+        # CloudFormation Read Access - NOUVEAU (pour récupérer les IPs)
+        - PolicyName: CloudFormationRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ListStacks
+                  - cloudformation:GetTemplate
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${EnvironmentName}*'
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-EC2-Role

@@ -60,6 +60,27 @@ Resources:
           
           # Update system
           dnf update -y
+           # ==================== INSTALL DOCKER ====================
+          echo "2. Installing Docker..."
+          dnf install -y docker
+          
+          # Start and enable Docker
+          systemctl start docker
+          systemctl enable docker
+          
+          # Add ec2-user to docker group
+          usermod -aG docker ec2-user
+          
+          # Verify Docker installation
+          docker --version
+          echo "✅ Docker installed successfully"
+          
+          # Install Docker Compose
+          echo "3. Installing Docker Compose..."
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+            -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          docker-compose --version
           
           # Install Node.js 20
           curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
@@ -225,6 +246,28 @@ Resources:
           
           # Update system
           dnf update -y
+
+           # ==================== INSTALL DOCKER ====================
+          echo "2. Installing Docker..."
+          dnf install -y docker
+          
+          # Start and enable Docker
+          systemctl start docker
+          systemctl enable docker
+          
+          # Add ec2-user to docker group
+          usermod -aG docker ec2-user
+          
+          # Verify Docker installation
+          docker --version
+          echo "✅ Docker installed successfully"
+          
+          # Install Docker Compose
+          echo "3. Installing Docker Compose..."
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+            -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          docker-compose --version
           
           # Install Node.js 20
           curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -

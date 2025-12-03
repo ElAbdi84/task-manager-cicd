@@ -57,6 +57,7 @@ jobs:
     outputs:
       frontend_image: ${{ steps.build-frontend.outputs.image }}
       backend_image: ${{ steps.build-backend.outputs.image }}
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
     
     steps:
       - name: Checkout code
@@ -153,6 +154,17 @@ jobs:
           echo ""
           echo "Frontend: ${{ steps.build-frontend.outputs.image }}"
           echo "Backend: ${{ steps.build-backend.outputs.image }}"
+          echo ""
+          echo "Verifying outputs are set..."
+          if [ -z "${{ steps.build-frontend.outputs.image }}" ]; then
+            echo "❌ ERROR: Frontend image output is empty!"
+            exit 1
+          fi
+          if [ -z "${{ steps.build-backend.outputs.image }}" ]; then
+            echo "❌ ERROR: Backend image output is empty!"
+            exit 1
+          fi
+          echo "✅ All outputs are valid"
 
   # ==================== DEPLOY FRONTEND ====================
   deploy-frontend:
@@ -174,6 +186,24 @@ jobs:
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construct Image URLs
+        id: image-urls
+        run: |
+          # Get ECR registry from AWS account
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          
+          # Construct image URLs
+          FRONTEND_IMAGE="$ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
+          BACKEND_IMAGE="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+          
+          echo "frontend_image=$FRONTEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
+          
+          echo "📦 Image URLs:"
+          echo "Frontend: $FRONTEND_IMAGE"
+          echo "Backend: $BACKEND_IMAGE"
 
       - name: Get Frontend IP
         id: get-ip
@@ -209,20 +239,23 @@ jobs:
       - name: Debug - Verify Image URLs
         run: |
           echo "🔍 Debugging Image URLs..."
-          echo "Frontend Image Output: ${{ needs.build-and-push.outputs.frontend_image }}"
-          echo "Backend Image Output: ${{ needs.build-and-push.outputs.backend_image }}"
+          echo "Step output - Frontend: ${{ steps.build-frontend.outputs.image }}"
+          echo "Step output - Backend: ${{ steps.build-backend.outputs.image }}"
+          echo "Job output - Frontend: ${{ needs.build-and-push.outputs.frontend_image }}"
+          echo "Job output - Backend: ${{ needs.build-and-push.outputs.backend_image }}"
+          echo ""
+          echo "Building image URLs from env vars..."
+          FRONTEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
+          BACKEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+          echo "Constructed Frontend: $FRONTEND_IMG"
+          echo "Constructed Backend: $BACKEND_IMG"
           
-          if [ -z "${{ needs.build-and-push.outputs.frontend_image }}" ]; then
-            echo "❌ Frontend image is empty!"
-            exit 1
+          # Use job outputs if available, otherwise construct from env
+          if [ ! -z "${{ needs.build-and-push.outputs.frontend_image }}" ]; then
+            echo "✅ Using job output for frontend"
+          else
+            echo "⚠️  Job output empty, will use constructed URL"
           fi
-          
-          if [ -z "${{ needs.build-and-push.outputs.backend_image }}" ]; then
-            echo "❌ Backend image is empty!"
-            exit 1
-          fi
-          
-          echo "✅ Both image URLs are valid"
 
       - name: Get Backend IP
         id: get-backend-ip
@@ -238,22 +271,17 @@ jobs:
 
       - name: Deploy Frontend Container
         env:
-          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+          FRONTEND_IMAGE: ${{ steps.image-urls.outputs.frontend_image }}
           BACKEND_IP: ${{ steps.get-backend-ip.outputs.backend_ip }}
-          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
-          IMAGE_TAG: ${{ github.sha }}
         run: |
           echo "🚀 Deploying Frontend container..."
-          echo "Frontend Image from output: $FRONTEND_IMAGE"
-          echo "Backend IP will be: $BACKEND_IP"
+          echo "📦 Frontend Image: $FRONTEND_IMAGE"
+          echo "🔗 Backend IP: $BACKEND_IP"
           
-          # Fallback si l'image est vide
           if [ -z "$FRONTEND_IMAGE" ]; then
-            FRONTEND_IMAGE="${ECR_REGISTRY}/${{ env.FRONTEND_IMAGE_NAME }}:${IMAGE_TAG}"
-            echo "⚠️ Using fallback image: $FRONTEND_IMAGE"
+            echo "❌ Frontend image URL is empty!"
+            exit 1
           fi
-          
-          echo "📦 Final Frontend Image: $FRONTEND_IMAGE"
           
           ssh -i ~/.ssh/task-manager-key.pem \
             -o StrictHostKeyChecking=no \
@@ -262,10 +290,10 @@ jobs:
             
             echo "🔐 Logging into ECR..."
             aws ecr get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin ${ECR_REGISTRY}
+              docker login --username AWS --password-stdin \$(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
             
-            echo "📥 Pulling Frontend image: ${FRONTEND_IMAGE}"
-            docker pull ${FRONTEND_IMAGE}
+            echo "📥 Pulling Frontend image: $FRONTEND_IMAGE"
+            docker pull $FRONTEND_IMAGE
             
             echo "🛑 Stopping old container..."
             docker stop taskmanager-frontend 2>/dev/null || true
@@ -276,9 +304,9 @@ jobs:
               --name taskmanager-frontend \
               --restart unless-stopped \
               -p 3000:80 \
-              ${FRONTEND_IMAGE}
+              $FRONTEND_IMAGE
             
-            echo "🔄 Updating Nginx configuration with Backend IP: ${BACKEND_IP}"
+            echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
             sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null << 'NGINX_EOF'
             upstream frontend {
                 server localhost:3000;
@@ -317,9 +345,9 @@ jobs:
             NGINX_EOF
             
             # Replace placeholder with actual backend IP
-            sudo sed -i "s/BACKEND_IP_PLACEHOLDER/${BACKEND_IP}/g" /etc/nginx/conf.d/taskmanager.conf
+            sudo sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
             
-            echo "✅ Nginx configuration updated with Backend IP: ${BACKEND_IP}"
+            echo "✅ Nginx configuration updated"
             
             sudo nginx -t
             sudo systemctl reload nginx
@@ -387,25 +415,33 @@ jobs:
           chmod 600 ~/.ssh/task-manager-key.pem
           ssh-keyscan -H ${{ steps.get-ips.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
 
+      - name: Construct Image URLs
+        id: image-urls
+        run: |
+          # Get ECR registry from AWS account
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          
+          # Construct backend image URL
+          BACKEND_IMAGE="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+          
+          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "📦 Backend Image: $BACKEND_IMAGE"
+
       - name: Deploy Backend Container
         env:
-          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+          BACKEND_IMAGE: ${{ steps.image-urls.outputs.backend_image }}
           BACKEND_IP: ${{ steps.get-ips.outputs.backend_ip }}
           FRONTEND_IP: ${{ steps.get-ips.outputs.frontend_ip }}
-          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
-          IMAGE_TAG: ${{ github.sha }}
         run: |
           echo "🚀 Deploying Backend container..."
-          echo "Backend Image from output: $BACKEND_IMAGE"
-          echo "Backend IP: $BACKEND_IP"
+          echo "📦 Backend Image: $BACKEND_IMAGE"
+          echo "🔗 Backend IP: $BACKEND_IP"
           
-          # Fallback si l'image est vide
           if [ -z "$BACKEND_IMAGE" ]; then
-            BACKEND_IMAGE="${ECR_REGISTRY}/${{ env.BACKEND_IMAGE_NAME }}:${IMAGE_TAG}"
-            echo "⚠️ Using fallback image: $BACKEND_IMAGE"
+            echo "❌ Backend image URL is empty!"
+            exit 1
           fi
-          
-          echo "📦 Final Backend Image: $BACKEND_IMAGE"
           
           # Copy SSH key to Frontend (bastion)
           scp -i ~/.ssh/task-manager-key.pem \
@@ -423,15 +459,15 @@ jobs:
             # Deploy to Backend via SSH
             ssh -i ~/.ssh/task-manager-key.pem \
               -o StrictHostKeyChecking=no \
-              ec2-user@${BACKEND_IP} << 'BACKEND_EOF'
+              ec2-user@$BACKEND_IP << 'BACKEND_EOF'
               set -e
               
               echo "🔐 Logging into ECR..."
               aws ecr get-login-password --region us-east-1 | \
-                docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                docker login --username AWS --password-stdin \$(echo "$BACKEND_IMAGE" | cut -d'/' -f1)
               
-              echo "📥 Pulling Backend image: ${BACKEND_IMAGE}"
-              docker pull ${BACKEND_IMAGE}
+              echo "📥 Pulling Backend image: $BACKEND_IMAGE"
+              docker pull $BACKEND_IMAGE
               
               echo "🛑 Stopping old container..."
               docker stop taskmanager-backend 2>/dev/null || true
@@ -447,7 +483,7 @@ jobs:
                 -e DB_PASSWORD=TaskManager2025! \
                 -e DB_NAME=taskmanager \
                 --network host \
-                ${BACKEND_IMAGE}
+                $BACKEND_IMAGE
               
               echo "✅ Backend container deployed!"
               docker ps | grep taskmanager-backend
@@ -499,6 +535,9 @@ jobs:
           echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
 
       - name: Display Summary
+        env:
+          FRONTEND_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
+          BACKEND_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
         run: |
           echo ""
           echo "🎉 ================================"
@@ -506,8 +545,8 @@ jobs:
           echo "🎉 ================================"
           echo ""
           echo "📦 Docker Images:"
-          echo "   Frontend: ${{ needs.build-and-push.outputs.frontend_image }}"
-          echo "   Backend: ${{ needs.build-and-push.outputs.backend_image }}"
+          echo "   Frontend: $FRONTEND_IMAGE"
+          echo "   Backend: $BACKEND_IMAGE"
           echo ""
           echo "🌐 Application URLs:"
           echo "   Frontend: http://${{ steps.get-ip.outputs.frontend_ip }}"

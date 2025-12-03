@@ -214,6 +214,7 @@ jobs:
           BACKEND_IP: ${{ steps.get-backend-ip.outputs.backend_ip }}
         run: |
           echo "🚀 Deploying Frontend container..."
+          echo "Frontend Image: $FRONTEND_IMAGE"
           echo "Backend IP will be: $BACKEND_IP"
           
           ssh -i ~/.ssh/task-manager-key.pem \
@@ -225,8 +226,8 @@ jobs:
             aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
               docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
             
-            echo "📥 Pulling Frontend image..."
-            docker pull $FRONTEND_IMAGE
+            echo "📥 Pulling Frontend image: ${{ needs.build-and-push.outputs.frontend_image }}"
+            docker pull ${{ needs.build-and-push.outputs.frontend_image }}
             
             echo "🛑 Stopping old container..."
             docker stop taskmanager-frontend 2>/dev/null || true
@@ -237,16 +238,16 @@ jobs:
               --name taskmanager-frontend \
               --restart unless-stopped \
               -p 3000:80 \
-              $FRONTEND_IMAGE
+              ${{ needs.build-and-push.outputs.frontend_image }}
             
-            echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
-            sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null << NGINX_EOF
+            echo "🔄 Updating Nginx configuration with Backend IP: ${{ steps.get-backend-ip.outputs.backend_ip }}"
+            sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null << 'NGINX_EOF'
             upstream frontend {
                 server localhost:3000;
             }
             
             upstream backend {
-                server $BACKEND_IP:5000;
+                server ${{ steps.get-backend-ip.outputs.backend_ip }}:5000;
             }
             
             server {
@@ -257,19 +258,19 @@ jobs:
                 location / {
                     proxy_pass http://frontend;
                     proxy_http_version 1.1;
-                    proxy_set_header Upgrade \\\$http_upgrade;
+                    proxy_set_header Upgrade \$http_upgrade;
                     proxy_set_header Connection 'upgrade';
-                    proxy_set_header Host \\\$host;
-                    proxy_cache_bypass \\\$http_upgrade;
+                    proxy_set_header Host \$host;
+                    proxy_cache_bypass \$http_upgrade;
                 }
                 
                 # Backend API - IP dynamique récupérée depuis CloudFormation
                 location /api/ {
                     proxy_pass http://backend/api/;
                     proxy_http_version 1.1;
-                    proxy_set_header Host \\\$host;
-                    proxy_set_header X-Real-IP \\\$remote_addr;
-                    proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
                     proxy_connect_timeout 60s;
                     proxy_send_timeout 60s;
                     proxy_read_timeout 60s;
@@ -277,7 +278,7 @@ jobs:
             }
             NGINX_EOF
             
-            echo "✅ Nginx configuration updated with Backend IP: $BACKEND_IP"
+            echo "✅ Nginx configuration updated with Backend IP: ${{ steps.get-backend-ip.outputs.backend_ip }}"
             
             sudo nginx -t
             sudo systemctl reload nginx
@@ -348,18 +349,22 @@ jobs:
       - name: Deploy Backend Container
         env:
           BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+          BACKEND_IP: ${{ steps.get-ips.outputs.backend_ip }}
+          FRONTEND_IP: ${{ steps.get-ips.outputs.frontend_ip }}
         run: |
           echo "🚀 Deploying Backend container..."
+          echo "Backend Image: $BACKEND_IMAGE"
+          echo "Backend IP: $BACKEND_IP"
           
           # Copy SSH key to Frontend (bastion)
           scp -i ~/.ssh/task-manager-key.pem \
             ~/.ssh/task-manager-key.pem \
-            ec2-user@${{ steps.get-ips.outputs.frontend_ip }}:~/.ssh/
+            ec2-user@$FRONTEND_IP:~/.ssh/
           
           # Deploy via Frontend to Backend
           ssh -i ~/.ssh/task-manager-key.pem \
             -o StrictHostKeyChecking=no \
-            ec2-user@${{ steps.get-ips.outputs.frontend_ip }} << 'ENDSSH'
+            ec2-user@$FRONTEND_IP << ENDSSH
             set -e
             
             chmod 600 ~/.ssh/task-manager-key.pem
@@ -367,15 +372,15 @@ jobs:
             # Deploy to Backend via SSH
             ssh -i ~/.ssh/task-manager-key.pem \
               -o StrictHostKeyChecking=no \
-              ec2-user@${{ steps.get-ips.outputs.backend_ip }} << 'BACKEND_EOF'
+              ec2-user@$BACKEND_IP << 'BACKEND_EOF'
               set -e
               
               echo "🔐 Logging into ECR..."
               aws ecr get-login-password --region ${{ env.AWS_REGION }} | \
                 docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
               
-              echo "📥 Pulling Backend image..."
-              docker pull ${{ env.BACKEND_IMAGE }}
+              echo "📥 Pulling Backend image: ${{ needs.build-and-push.outputs.backend_image }}"
+              docker pull ${{ needs.build-and-push.outputs.backend_image }}
               
               echo "🛑 Stopping old container..."
               docker stop taskmanager-backend 2>/dev/null || true
@@ -391,7 +396,7 @@ jobs:
                 -e DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
                 -e DB_NAME=taskmanager \
                 --network host \
-                ${{ env.BACKEND_IMAGE }}
+                ${{ needs.build-and-push.outputs.backend_image }}
               
               echo "✅ Backend container deployed!"
               docker ps | grep taskmanager-backend

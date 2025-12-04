@@ -470,8 +470,7 @@ jobs:
               docker pull $BACKEND_IMAGE
               
               echo "🛑 Stopping old container..."
-              docker stop taskmanager-backend 2>/dev/null || true
-              docker rm taskmanager-backend 2>/dev/null || true
+              docker rm -f taskmanager-backend 2>/dev/null || true
               
               echo "🚀 Starting new Backend container..."
               docker run -d \

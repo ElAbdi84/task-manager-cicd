@@ -326,69 +326,71 @@ jobs:
             sudo mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled 2>/dev/null || true
             sudo mv /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.disabled 2>/dev/null || true
             
-            # Comment out any server blocks in main nginx.conf
-            sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.backup
-            sudo sed -i '/^[[:space:]]*server[[:space:]]*{/,/^[[:space:]]*}/s/^/#/' /etc/nginx/nginx.conf
+            # Create Nginx config with proper variable expansion
+            sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null <<'EOF'
+           upstream frontend_app {
+          server localhost:3000;
+          }
+
+          upstream backend_app {
+            server $BACKEND_IP:5000;
+            }
+
+          server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+          server_name _;
+
+          location / {
+           proxy_pass http://frontend_app;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection 'upgrade';
+          proxy_set_header Host $host;
+          proxy_cache_bypass $http_upgrade;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          }
+
+          location /api/ {
+           proxy_pass http://backend_app/api/;
+           proxy_http_version 1.1;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_connect_timeout 60s;
+          proxy_send_timeout 60s;
+          proxy_read_timeout 60s;
+          }
+          }
+          EOF
             
-             # Create Nginx config using echo
-          {
-            echo "upstream frontend_app {"
-            echo "    server localhost:3000;"
-            echo "}"
-            echo ""
-            echo "upstream backend_app {"
-            echo "    server \$BACKEND_IP:5000;"
-            echo "}"
-            echo ""
-            echo "server {"
-            echo "    listen 80 default_server;"
-            echo "    listen [::]:80 default_server;"
-            echo "    server_name _;"
-            echo ""
-            echo "    location / {"
-            echo "        proxy_pass http://frontend_app;"
-            echo "        proxy_http_version 1.1;"
-            echo "        proxy_set_header Upgrade \\\$http_upgrade;"
-            echo "        proxy_set_header Connection 'upgrade';"
-            echo "        proxy_set_header Host \\\$host;"
-            echo "        proxy_cache_bypass \\\$http_upgrade;"
-            echo "        proxy_set_header X-Real-IP \\\$remote_addr;"
-            echo "        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;"
-            echo "    }"
-            echo ""
-            echo "    location /api/ {"
-            echo "        proxy_pass http://backend_app/api/;"
-            echo "        proxy_http_version 1.1;"
-            echo "        proxy_set_header Host \\\$host;"
-            echo "        proxy_set_header X-Real-IP \\\$remote_addr;"
-            echo "        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;"
-            echo "        proxy_connect_timeout 60s;"
-            echo "        proxy_send_timeout 60s;"
-            echo "        proxy_read_timeout 60s;"
-            echo "    }"
-            echo "}"
-          } | sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null
+            # Replace $BACKEND_IP with actual value
+            sudo sed -i "s/\$BACKEND_IP/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
             
-          
+            echo "✅ Nginx configuration created"
             
-             echo "✅ Nginx configuration created"
-          
-          echo "🧪 Testing Nginx configuration..."
-          if ! sudo nginx -t; then
-            echo "❌ Nginx test failed"
+            # Show the final config for debugging
+            echo "📄 Final Nginx configuration:"
             sudo cat /etc/nginx/conf.d/taskmanager.conf
-            exit 1
-          fi
-          
-          echo "🔄 Reloading Nginx..."
-          sudo systemctl reload nginx
-          
-          sleep 3
-          
-          echo "✅ Deployment complete!"
-          echo "  Container: \$(docker ps --filter name=taskmanager-frontend --format '{{.ID}}')"
-          echo "  Frontend :3000: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
-          echo "  Nginx proxy: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
+            
+            echo "🧪 Testing Nginx configuration..."
+            if ! sudo nginx -t; then
+              echo "❌ Nginx test failed"
+              echo "Main nginx.conf:"
+              sudo cat /etc/nginx/nginx.conf
+              exit 1
+            fi
+            
+            echo "🔄 Reloading Nginx..."
+            sudo systemctl reload nginx
+            
+            sleep 3
+            
+            echo "✅ Deployment complete!"
+            echo "  Container: $(docker ps --filter name=taskmanager-frontend --format '{{.ID}}')"
+            echo "  Frontend :3000: $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
+            echo "  Nginx proxy: $(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
           ENDSSH
 
       - name: Verify Frontend Deployment

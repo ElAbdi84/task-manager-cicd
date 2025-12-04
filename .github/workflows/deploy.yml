@@ -369,46 +369,26 @@ jobs:
             echo "}"
           } | sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null
             
-            # Replace placeholder with actual backend IP
-            sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /tmp/taskmanager.conf
+          
             
-            # Move to nginx conf.d
-            sudo mv /tmp/taskmanager.conf /etc/nginx/conf.d/taskmanager.conf
-            
-            echo "✅ Nginx configuration created"
-            
-            # Test configuration
-            echo "🧪 Testing Nginx configuration..."
-            if ! sudo nginx -t; then
-              echo "❌ Nginx configuration test failed"
-              sudo cat /etc/nginx/conf.d/taskmanager.conf
-              exit 1
-            fi
-            
-            # Test configuration
-            echo "🧪 Testing Nginx configuration..."
-            if ! sudo nginx -t; then
-              echo "❌ Nginx configuration test failed"
-              sudo cat /etc/nginx/conf.d/taskmanager.conf
-              exit 1
-            fi
-            
-            # Reload Nginx
-            echo "🔄 Reloading Nginx..."
-            sudo systemctl reload nginx
-            
-            # Wait a moment for Nginx to reload
-            sleep 3
-            
-            # Verify the setup
-            echo "✅ Deployment verification:"
-            echo "  - Container running: \$(docker ps | grep -q taskmanager-frontend && echo 'Yes' || echo 'No')"
-            echo "  - Nginx active: \$(sudo systemctl is-active nginx)"
-            echo "  - Frontend responds on :3000: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
-            echo "  - Nginx proxies correctly: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
-            
-            echo "✅ Frontend container deployed!"
-            docker ps | grep taskmanager-frontend
+             echo "✅ Nginx configuration created"
+          
+          echo "🧪 Testing Nginx configuration..."
+          if ! sudo nginx -t; then
+            echo "❌ Nginx test failed"
+            sudo cat /etc/nginx/conf.d/taskmanager.conf
+            exit 1
+          fi
+          
+          echo "🔄 Reloading Nginx..."
+          sudo systemctl reload nginx
+          
+          sleep 3
+          
+          echo "✅ Deployment complete!"
+          echo "  Container: \$(docker ps --filter name=taskmanager-frontend --format '{{.ID}}')"
+          echo "  Frontend :3000: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
+          echo "  Nginx proxy: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
           ENDSSH
 
       - name: Verify Frontend Deployment

@@ -8,13 +8,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Ne déployer que si la PR est mergée (pas juste fermée)
+# ou si c'est un push direct sur main
+
 env:
   AWS_REGION: us-east-1
   ENVIRONMENT_NAME: TaskManager
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
   FRONTEND_IMAGE_NAME: taskmanager-frontend
   BACKEND_IMAGE_NAME: taskmanager-backend
 
 jobs:
+  # ==================== CHECK IF DEPLOYMENT NEEDED ====================
   check-deployment:
     name: Check if Deployment Needed
     runs-on: ubuntu-latest
@@ -24,26 +29,34 @@ jobs:
       - name: Check deployment condition
         id: check
         run: |
+          # Deploy si:
+          # 1. Push direct sur main
+          # 2. PR mergée (pas juste fermée)
+          # 3. Déclenchement manuel
+          
           if [[ "${{ github.event_name }}" == "push" ]]; then
             echo "should_deploy=true" >> $GITHUB_OUTPUT
             echo "✅ Deployment triggered by push to main"
           elif [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.pull_request.merged }}" == "true" ]]; then
             echo "should_deploy=true" >> $GITHUB_OUTPUT
-            echo "✅ Deployment triggered by merged PR"
+            echo "✅ Deployment triggered by merged PR #${{ github.event.pull_request.number }}"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "should_deploy=true" >> $GITHUB_OUTPUT
             echo "✅ Deployment triggered manually"
           else
             echo "should_deploy=false" >> $GITHUB_OUTPUT
-            echo "⏸️  Deployment skipped"
+            echo "⏸️  Deployment skipped - PR was closed without merging"
           fi
 
+  # ==================== BUILD & PUSH IMAGES ====================
   build-and-push:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
     needs: [check-deployment]
     if: needs.check-deployment.outputs.should_deploy == 'true'
     outputs:
+      frontend_image: ${{ steps.build-frontend.outputs.image }}
+      backend_image: ${{ steps.build-backend.outputs.image }}
       ecr_registry: ${{ steps.login-ecr.outputs.registry }}
     
     steps:
@@ -73,11 +86,16 @@ jobs:
           echo "Frontend IP: $FRONTEND_IP"
 
       - name: Build Frontend Docker Image
+        id: build-frontend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           echo "🔨 Building Frontend Docker image..."
+          echo "Registry: $ECR_REGISTRY"
+          echo "Image tag: $IMAGE_TAG"
+          
+          # Build image with build args
           docker build \
             -f frontend/Dockerfile \
             --build-arg REACT_APP_API_URL=http://${{ steps.get-ip.outputs.frontend_ip }}/api \
@@ -85,34 +103,278 @@ jobs:
             -t $ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:latest \
             ./frontend
           
+          # Push to ECR
           echo "📤 Pushing Frontend image to ECR..."
           docker push $ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:$IMAGE_TAG
           docker push $ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:latest
           
-          echo "✅ Frontend image: $ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:$IMAGE_TAG"
+          # Output image URL
+          IMAGE_URL="$ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:$IMAGE_TAG"
+          echo "image=$IMAGE_URL" >> $GITHUB_OUTPUT
+          echo "✅ Frontend image: $IMAGE_URL"
+          
+          # Debug: Verify the output
+          cat $GITHUB_OUTPUT | grep "image="
 
       - name: Build Backend Docker Image
+        id: build-backend
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           echo "🔨 Building Backend Docker image..."
+          echo "Registry: $ECR_REGISTRY"
+          echo "Image tag: $IMAGE_TAG"
+          
+          # Build image
           docker build \
             -f backend/Dockerfile \
             -t $ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:$IMAGE_TAG \
             -t $ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:latest \
             ./backend
           
+          # Push to ECR
           echo "📤 Pushing Backend image to ECR..."
           docker push $ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:$IMAGE_TAG
           docker push $ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:latest
           
-          echo "✅ Backend image: $ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:$IMAGE_TAG"
+          # Output image URL
+          IMAGE_URL="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:$IMAGE_TAG"
+          echo "image=$IMAGE_URL" >> $GITHUB_OUTPUT
+          echo "✅ Backend image: $IMAGE_URL"
+          
+          # Debug: Verify the output
+          cat $GITHUB_OUTPUT | grep "image="
 
+      - name: Image Build Summary
+        run: |
+          echo "📦 ================================"
+          echo "📦 DOCKER IMAGES BUILT"
+          echo "📦 ================================"
+          echo ""
+          echo "Frontend: ${{ steps.build-frontend.outputs.image }}"
+          echo "Backend: ${{ steps.build-backend.outputs.image }}"
+          echo ""
+          echo "Verifying outputs are set..."
+          if [ -z "${{ steps.build-frontend.outputs.image }}" ]; then
+            echo "❌ ERROR: Frontend image output is empty!"
+            exit 1
+          fi
+          if [ -z "${{ steps.build-backend.outputs.image }}" ]; then
+            echo "❌ ERROR: Backend image output is empty!"
+            exit 1
+          fi
+          echo "✅ All outputs are valid"
+
+  # ==================== DEPLOY FRONTEND ====================
   deploy-frontend:
     name: Deploy Frontend Container
     runs-on: ubuntu-latest
     needs: [check-deployment, build-and-push]
+    if: needs.check-deployment.outputs.should_deploy == 'true'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construct Image URLs
+        id: image-urls
+        run: |
+          # Get ECR registry from AWS account
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          
+          # Construct image URLs
+          FRONTEND_IMAGE="$ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
+          BACKEND_IMAGE="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+          
+          echo "frontend_image=$FRONTEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
+          
+          echo "📦 Image URLs:"
+          echo "Frontend: $FRONTEND_IMAGE"
+          echo "Backend: $BACKEND_IMAGE"
+
+      - name: Get Frontend IP
+        id: get-ip
+        run: |
+          FRONTEND_IP=$(aws cloudformation describe-stacks \
+            --stack-name TaskManager-compute \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendPublicIP`].OutputValue' \
+            --output text)
+          echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
+          echo "✅ Frontend IP: $FRONTEND_IP"
+
+      - name: Setup SSH Key
+        run: |
+          echo "🔑 Setting up SSH key..."
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # Decode base64 key
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}" | base64 -d > ~/.ssh/task-manager-key.pem
+          chmod 600 ~/.ssh/task-manager-key.pem
+          
+          # Validate key
+          if ! grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
+            echo "❌ SSH key decode failure"
+            exit 1
+          fi
+          
+          # Add host to known_hosts
+          ssh-keyscan -H ${{ steps.get-ip.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo "✅ SSH key configured"
+
+      - name: Debug - Verify Image URLs
+        run: |
+          echo "🔍 Debugging Image URLs..."
+          echo "Step output - Frontend: ${{ steps.build-frontend.outputs.image }}"
+          echo "Step output - Backend: ${{ steps.build-backend.outputs.image }}"
+          echo "Job output - Frontend: ${{ needs.build-and-push.outputs.frontend_image }}"
+          echo "Job output - Backend: ${{ needs.build-and-push.outputs.backend_image }}"
+          echo ""
+          echo "Building image URLs from env vars..."
+          FRONTEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
+          BACKEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+          echo "Constructed Frontend: $FRONTEND_IMG"
+          echo "Constructed Backend: $BACKEND_IMG"
+          
+          # Use job outputs if available, otherwise construct from env
+          if [ ! -z "${{ needs.build-and-push.outputs.frontend_image }}" ]; then
+            echo "✅ Using job output for frontend"
+          else
+            echo "⚠️  Job output empty, will use constructed URL"
+          fi
+
+      - name: Get Backend IP
+        id: get-backend-ip
+        run: |
+          echo "🔍 Fetching Backend IP from CloudFormation..."
+          BACKEND_IP=$(aws cloudformation describe-stacks \
+            --stack-name TaskManager-compute \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`BackendPrivateIP`].OutputValue' \
+            --output text)
+          echo "backend_ip=$BACKEND_IP" >> $GITHUB_OUTPUT
+          echo "✅ Backend IP: $BACKEND_IP"
+
+      - name: Deploy Frontend Container
+        env:
+          FRONTEND_IMAGE: ${{ steps.image-urls.outputs.frontend_image }}
+          BACKEND_IP: ${{ steps.get-backend-ip.outputs.backend_ip }}
+        run: |
+          echo "🚀 Deploying Frontend container..."
+          echo "📦 Frontend Image: $FRONTEND_IMAGE"
+          echo "🔗 Backend IP: $BACKEND_IP"
+          
+          if [ -z "$FRONTEND_IMAGE" ]; then
+            echo "❌ Frontend image URL is empty!"
+            exit 1
+          fi
+          
+          ssh -i ~/.ssh/task-manager-key.pem \
+            -o StrictHostKeyChecking=no \
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} << ENDSSH
+            set -e
+            
+            echo "🔐 Logging into ECR..."
+            aws ecr get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin \$(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
+            
+            echo "📥 Pulling Frontend image: $FRONTEND_IMAGE"
+            docker pull $FRONTEND_IMAGE
+            
+            echo "🛑 Stopping old container..."
+            docker stop taskmanager-frontend 2>/dev/null || true
+            docker rm taskmanager-frontend 2>/dev/null || true
+            
+            echo "🚀 Starting new Frontend container..."
+            docker run -d \
+              --name taskmanager-frontend \
+              --restart unless-stopped \
+              -p 3000:80 \
+              $FRONTEND_IMAGE
+            
+            echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
+            sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null << 'NGINX_EOF'
+            upstream frontend {
+                server localhost:3000;
+            }
+            
+            upstream backend {
+                server BACKEND_IP_PLACEHOLDER:5000;
+            }
+            
+            server {
+                listen 80;
+                server_name _;
+                
+                # Frontend
+                location / {
+                    proxy_pass http://frontend;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade \$http_upgrade;
+                    proxy_set_header Connection 'upgrade';
+                    proxy_set_header Host \$host;
+                    proxy_cache_bypass \$http_upgrade;
+                }
+                
+                # Backend API - IP dynamique récupérée depuis CloudFormation
+                location /api/ {
+                    proxy_pass http://backend/api/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_connect_timeout 60s;
+                    proxy_send_timeout 60s;
+                    proxy_read_timeout 60s;
+                }
+            }
+            NGINX_EOF
+            
+            # Replace placeholder with actual backend IP
+            sudo sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
+            
+            echo "✅ Nginx configuration updated"
+            
+            sudo nginx -t
+            sudo systemctl reload nginx
+            
+            echo "✅ Frontend container deployed!"
+            docker ps | grep taskmanager-frontend
+          ENDSSH
+
+      - name: Verify Frontend Deployment
+        run: |
+          echo "🔍 Verifying Frontend deployment..."
+          sleep 10
+          
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ip.outputs.frontend_ip }})
+          
+          if [ "$STATUS" -eq 200 ]; then
+            echo "✅ Frontend is accessible (HTTP $STATUS)"
+          else
+            echo "❌ Frontend returned HTTP $STATUS"
+            exit 1
+          fi
+
+  # ==================== DEPLOY BACKEND ====================
+  deploy-backend:
+    name: Deploy Backend Container
+    runs-on: ubuntu-latest
+    needs: [check-deployment, build-and-push, deploy-frontend]
     if: needs.check-deployment.outputs.should_deploy == 'true'
     
     steps:
@@ -134,20 +396,16 @@ jobs:
         run: |
           FRONTEND_IP=$(aws cloudformation describe-stacks \
             --stack-name TaskManager-compute \
-            --region ${{ env.AWS_REGION }} \
             --query 'Stacks[0].Outputs[?OutputKey==`FrontendPublicIP`].OutputValue' \
             --output text)
           
           BACKEND_IP=$(aws cloudformation describe-stacks \
             --stack-name TaskManager-compute \
-            --region ${{ env.AWS_REGION }} \
             --query 'Stacks[0].Outputs[?OutputKey==`BackendPrivateIP`].OutputValue' \
             --output text)
           
           echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
           echo "backend_ip=$BACKEND_IP" >> $GITHUB_OUTPUT
-          echo "✅ Frontend IP: $FRONTEND_IP"
-          echo "✅ Backend IP: $BACKEND_IP"
 
       - name: Setup SSH Key
         run: |
@@ -157,72 +415,107 @@ jobs:
           chmod 600 ~/.ssh/task-manager-key.pem
           ssh-keyscan -H ${{ steps.get-ips.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Deploy Frontend Container
-        env:
-          ECR_REGISTRY: ${{ needs.build-and-push.outputs.ecr_registry }}
-          IMAGE_TAG: ${{ github.sha }}
-          BACKEND_IP: ${{ steps.get-ips.outputs.backend_ip }}
+      - name: Construct Image URLs
+        id: image-urls
         run: |
-          FRONTEND_IMAGE="$ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:$IMAGE_TAG"
-          echo "🚀 Deploying: $FRONTEND_IMAGE"
+          # Get ECR registry from AWS account
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
           
+          # Construct backend image URL
+          BACKEND_IMAGE="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
+          
+          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "📦 Backend Image: $BACKEND_IMAGE"
+
+      - name: Deploy Backend Container
+        env:
+          BACKEND_IMAGE: ${{ steps.image-urls.outputs.backend_image }}
+          BACKEND_IP: ${{ steps.get-ips.outputs.backend_ip }}
+          FRONTEND_IP: ${{ steps.get-ips.outputs.frontend_ip }}
+        run: |
+          echo "🚀 Deploying Backend container..."
+          echo "📦 Backend Image: $BACKEND_IMAGE"
+          echo "🔗 Backend IP: $BACKEND_IP"
+          
+          if [ -z "$BACKEND_IMAGE" ]; then
+            echo "❌ Backend image URL is empty!"
+            exit 1
+          fi
+          
+          # Copy SSH key to Frontend (bastion)
+          scp -i ~/.ssh/task-manager-key.pem \
+            ~/.ssh/task-manager-key.pem \
+            ec2-user@$FRONTEND_IP:~/.ssh/
+          
+          # Deploy via Frontend to Backend
           ssh -i ~/.ssh/task-manager-key.pem \
             -o StrictHostKeyChecking=no \
-            ec2-user@${{ steps.get-ips.outputs.frontend_ip }} bash -s <<'ENDSSH'
+            ec2-user@$FRONTEND_IP << ENDSSH
             set -e
             
-            aws ecr get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin $ECR_REGISTRY
+            chmod 600 ~/.ssh/task-manager-key.pem
             
-            docker pull $FRONTEND_IMAGE
-            docker stop taskmanager-frontend 2>/dev/null || true
-            docker rm taskmanager-frontend 2>/dev/null || true
-            
-            docker run -d \
-              --name taskmanager-frontend \
-              --restart unless-stopped \
-              -p 3000:80 \
-              $FRONTEND_IMAGE
-            
-            sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null <<'NGINX_EOF'
-            upstream frontend { server localhost:3000; }
-            upstream backend { server BACKEND_IP_PLACEHOLDER:5000; }
-            
-            server {
-                listen 80;
-                location / {
-                    proxy_pass http://frontend;
-                    proxy_http_version 1.1;
-                    proxy_set_header Host $host;
-                }
-                location /api/ {
-                    proxy_pass http://backend/api/;
-                    proxy_set_header Host $host;
-                }
-            }
-            NGINX_EOF
-            
-            sudo sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
-            sudo nginx -t && sudo systemctl reload nginx
-            echo "✅ Deployed!"
+            # Deploy to Backend via SSH
+            ssh -i ~/.ssh/task-manager-key.pem \
+              -o StrictHostKeyChecking=no \
+              ec2-user@$BACKEND_IP << 'BACKEND_EOF'
+              set -e
+              
+              echo "🔐 Logging into ECR..."
+              aws ecr get-login-password --region us-east-1 | \
+                docker login --username AWS --password-stdin \$(echo "$BACKEND_IMAGE" | cut -d'/' -f1)
+              
+              echo "📥 Pulling Backend image: $BACKEND_IMAGE"
+              docker pull $BACKEND_IMAGE
+              
+              echo "🛑 Stopping old container..."
+              docker stop taskmanager-backend 2>/dev/null || true
+              docker rm taskmanager-backend 2>/dev/null || true
+              
+              echo "🚀 Starting new Backend container..."
+              docker run -d \
+                --name taskmanager-backend \
+                --restart unless-stopped \
+                -p 5000:5000 \
+                -e DB_HOST=localhost \
+                -e DB_USER=taskuser \
+                -e DB_PASSWORD=TaskManager2025! \
+                -e DB_NAME=taskmanager \
+                --network host \
+                $BACKEND_IMAGE
+              
+              echo "✅ Backend container deployed!"
+              docker ps | grep taskmanager-backend
+              
+              # Wait for backend to start
+              sleep 5
+              
+              # Test backend health
+              curl -f http://localhost:5000/api/health || echo "⚠️ Backend health check failed"
+          BACKEND_EOF
           ENDSSH
 
-      - name: Verify Frontend Deployment
+      - name: Verify Backend Deployment
         run: |
-          echo "🔍 Verifying deployment..."
-          sleep 10
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ips.outputs.frontend_ip }})
-          if [ "$STATUS" = "200" ]; then
-            echo "✅ Frontend accessible (HTTP $STATUS)"
+          echo "🔍 Verifying Backend deployment..."
+          sleep 5
+          
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            http://${{ steps.get-ips.outputs.frontend_ip }}/api/health)
+          
+          if [ "$STATUS" -eq 200 ]; then
+            echo "✅ Backend is healthy (HTTP $STATUS)"
           else
-            echo "⚠️  HTTP $STATUS"
+            echo "⚠️ Backend returned HTTP $STATUS"
           fi
 
-  deploy-backend:
-    name: Deploy Backend Container
+  # ==================== DEPLOYMENT SUMMARY ====================
+  deployment-summary:
+    name: Deployment Summary
     runs-on: ubuntu-latest
-    needs: [check-deployment, build-and-push, deploy-frontend]
-    if: needs.check-deployment.outputs.should_deploy == 'true'
+    needs: [check-deployment, build-and-push, deploy-frontend, deploy-backend]
+    if: always() && needs.check-deployment.outputs.should_deploy == 'true'
     
     steps:
       - name: Configure AWS Credentials
@@ -232,39 +525,43 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get IPs
-        id: get-ips
+      - name: Get Frontend IP
+        id: get-ip
         run: |
-          FRONTEND_IP=$(aws cloudformation describe-stacks --stack-name TaskManager-compute --query 'Stacks[0].Outputs[?OutputKey==`FrontendPublicIP`].OutputValue' --output text)
-          BACKEND_IP=$(aws cloudformation describe-stacks --stack-name TaskManager-compute --query 'Stacks[0].Outputs[?OutputKey==`BackendPrivateIP`].OutputValue' --output text)
+          FRONTEND_IP=$(aws cloudformation describe-stacks \
+            --stack-name TaskManager-compute \
+            --query 'Stacks[0].Outputs[?OutputKey==`FrontendPublicIP`].OutputValue' \
+            --output text)
           echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
-          echo "backend_ip=$BACKEND_IP" >> $GITHUB_OUTPUT
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}" | base64 -d > ~/.ssh/key.pem
-          chmod 600 ~/.ssh/key.pem
-          ssh-keyscan -H ${{ steps.get-ips.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
-
-      - name: Deploy Backend
+      - name: Display Summary
         env:
-          ECR_REGISTRY: ${{ needs.build-and-push.outputs.ecr_registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          FRONTEND_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
+          BACKEND_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}
         run: |
-          BACKEND_IMAGE="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:$IMAGE_TAG"
-          scp -i ~/.ssh/key.pem ~/.ssh/key.pem ec2-user@${{ steps.get-ips.outputs.frontend_ip }}:~/.ssh/
+          echo ""
+          echo "🎉 ================================"
+          echo "🎉 DEPLOYMENT COMPLETE"
+          echo "🎉 ================================"
+          echo ""
+          echo "📦 Docker Images:"
+          echo "   Frontend: $FRONTEND_IMAGE"
+          echo "   Backend: $BACKEND_IMAGE"
+          echo ""
+          echo "🌐 Application URLs:"
+          echo "   Frontend: http://${{ steps.get-ip.outputs.frontend_ip }}"
+          echo "   API Health: http://${{ steps.get-ip.outputs.frontend_ip }}/api/health"
+          echo "   API Tasks: http://${{ steps.get-ip.outputs.frontend_ip }}/api/tasks"
+          echo ""
+          echo "📊 Deployment Status:"
+          echo "   Build & Push: ${{ needs.build-and-push.result }}"
+          echo "   Frontend Deploy: ${{ needs.deploy-frontend.result }}"
+          echo "   Backend Deploy: ${{ needs.deploy-backend.result }}"
+          echo ""
           
-          ssh -i ~/.ssh/key.pem ec2-user@${{ steps.get-ips.outputs.frontend_ip }} bash -s <<ENDSSH
-          chmod 600 ~/.ssh/key.pem
-          ssh -i ~/.ssh/key.pem -o StrictHostKeyChecking=no ec2-user@${{ steps.get-ips.outputs.backend_ip }} bash -s <<'BACKEND_EOF'
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
-          docker pull $BACKEND_IMAGE
-          docker stop taskmanager-backend 2>/dev/null || true
-          docker rm taskmanager-backend 2>/dev/null || true
-          docker run -d --name taskmanager-backend --restart unless-stopped -p 5000:5000 \
-            -e DB_HOST=localhost -e DB_USER=taskuser -e DB_PASSWORD=TaskManager2025! -e DB_NAME=taskmanager \
-            --network host $BACKEND_IMAGE
-          sleep 5 && curl -f http://localhost:5000/api/health || echo "⚠️ Check failed"
-          BACKEND_EOF
-          ENDSSH
+          if [[ "${{ needs.deploy-frontend.result }}" == "success" ]] && \
+             [[ "${{ needs.deploy-backend.result }}" == "success" ]]; then
+            echo "✅ All deployments successful!"
+          else
+            echo "⚠️ Some deployments failed. Check logs above."
+          fi

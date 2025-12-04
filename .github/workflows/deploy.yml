@@ -307,45 +307,50 @@ jobs:
               $FRONTEND_IMAGE
             
             echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
-            sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null << 'NGINX_EOF'
+            
+            # Create Nginx configuration
+            cat > /tmp/taskmanager.conf << 'NGINX_EOF'
             upstream frontend {
-                server localhost:3000;
+           server localhost:3000;
+           }
+
+          upstream backend {
+          server BACKEND_IP_PLACEHOLDER:5000;
+          }
+
+          server {
+          listen 80;
+          server_name _;
+    
+          # Frontend
+          location / {
+          proxy_pass http://frontend;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection 'upgrade';
+          proxy_set_header Host $host;
+          proxy_cache_bypass $http_upgrade;
+          }
+    
+          # Backend API - IP dynamique récupérée depuis CloudFormation
+          location /api/ {
+           proxy_pass http://backend/api/;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_connect_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_read_timeout 60s;
             }
-            
-            upstream backend {
-                server BACKEND_IP_PLACEHOLDER:5000;
-            }
-            
-            server {
-                listen 80;
-                server_name _;
-                
-                # Frontend
-                location / {
-                    proxy_pass http://frontend;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade \$http_upgrade;
-                    proxy_set_header Connection 'upgrade';
-                    proxy_set_header Host \$host;
-                    proxy_cache_bypass \$http_upgrade;
-                }
-                
-                # Backend API - IP dynamique récupérée depuis CloudFormation
-                location /api/ {
-                    proxy_pass http://backend/api/;
-                    proxy_http_version 1.1;
-                    proxy_set_header Host \$host;
-                    proxy_set_header X-Real-IP \$remote_addr;
-                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                    proxy_connect_timeout 60s;
-                    proxy_send_timeout 60s;
-                    proxy_read_timeout 60s;
-                }
-            }
-            NGINX_EOF
+          }
+          NGINX_EOF
             
             # Replace placeholder with actual backend IP
-            sudo sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
+            sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /tmp/taskmanager.conf
+            
+            # Move to nginx conf.d
+            sudo mv /tmp/taskmanager.conf /etc/nginx/conf.d/taskmanager.conf
             
             echo "✅ Nginx configuration updated"
             

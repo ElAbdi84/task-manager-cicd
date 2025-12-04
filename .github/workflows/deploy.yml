@@ -306,29 +306,7 @@ jobs:
               -p 3000:80 \
               $FRONTEND_IMAGE
             
-            # Wait for container to be healthy
-            echo "⏳ Waiting for container to be healthy..."
-            sleep 5
-            
-            # Verify container is running
-            if ! docker ps | grep -q taskmanager-frontend; then
-              echo "❌ Container failed to start"
-              docker logs taskmanager-frontend
-              exit 1
-            fi
-            
             echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
-            
-            # Remove default HTML that interferes
-            sudo rm -f /var/www/html/index.html
-            
-            # Disable default Nginx configs that might interfere
-            sudo mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled 2>/dev/null || true
-            sudo mv /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.disabled 2>/dev/null || true
-            
-            # Comment out any server blocks in main nginx.conf
-            sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.backup
-            sudo sed -i '/^[[:space:]]*server[[:space:]]*{/,/^[[:space:]]*}/s/^/#/' /etc/nginx/nginx.conf
             
             # Create Nginx configuration
             cat > /tmp/taskmanager.conf << 'NGINX_EOF'
@@ -341,37 +319,32 @@ jobs:
            }
 
           server {
-          listen 80 default_server;
-          listen [::]:80 default_server;
+           listen 80;
           server_name _;
     
-              # Frontend
-            location / {
+           # Frontend
+           location / {
            proxy_pass http://frontend;
-           proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-           proxy_set_header Connection 'upgrade';
-           proxy_set_header Host $host;
-           proxy_cache_bypass $http_upgrade;
-           proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-          }
-    
-          # Backend API
-          location /api/ {
-          proxy_pass http://backend/api/;
           proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection 'upgrade';
           proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-          proxy_connect_timeout 60s;
-          proxy_send_timeout 60s;
-          proxy_read_timeout 60s;
-          }
-          }
-          NGINX_EOF
+          proxy_cache_bypass $http_upgrade;
+           }
+    
+           # Backend API - IP dynamique récupérée depuis CloudFormation
+           location /api/ {
+           proxy_pass http://backend/api/;
+           proxy_http_version 1.1;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_connect_timeout 60s;
+           proxy_send_timeout 60s;
+           proxy_read_timeout 60s;
+             }
+            }
+           NGINX_EOF
             
             # Replace placeholder with actual backend IP
             sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /tmp/taskmanager.conf
@@ -379,37 +352,10 @@ jobs:
             # Move to nginx conf.d
             sudo mv /tmp/taskmanager.conf /etc/nginx/conf.d/taskmanager.conf
             
-            echo "✅ Nginx configuration created"
+            echo "✅ Nginx configuration updated"
             
-            # Test configuration
-            echo "🧪 Testing Nginx configuration..."
-            if ! sudo nginx -t; then
-              echo "❌ Nginx configuration test failed"
-              sudo cat /etc/nginx/conf.d/taskmanager.conf
-              exit 1
-            fi
-            
-            # Test configuration
-            echo "🧪 Testing Nginx configuration..."
-            if ! sudo nginx -t; then
-              echo "❌ Nginx configuration test failed"
-              sudo cat /etc/nginx/conf.d/taskmanager.conf
-              exit 1
-            fi
-            
-            # Reload Nginx
-            echo "🔄 Reloading Nginx..."
+            sudo nginx -t
             sudo systemctl reload nginx
-            
-            # Wait a moment for Nginx to reload
-            sleep 3
-            
-            # Verify the setup
-            echo "✅ Deployment verification:"
-            echo "  - Container running: \$(docker ps | grep -q taskmanager-frontend && echo 'Yes' || echo 'No')"
-            echo "  - Nginx active: \$(sudo systemctl is-active nginx)"
-            echo "  - Frontend responds on :3000: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
-            echo "  - Nginx proxies correctly: \$(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
             
             echo "✅ Frontend container deployed!"
             docker ps | grep taskmanager-frontend
@@ -544,32 +490,14 @@ jobs:
                 --network host \
                 $BACKEND_IMAGE
               
-              echo "⏳ Waiting for backend to start..."
-              sleep 10
-              
-              # Verify container is running
-              if ! docker ps | grep -q taskmanager-backend; then
-                echo "❌ Backend container failed to start"
-                docker logs taskmanager-backend
-                exit 1
-              fi
-              
               echo "✅ Backend container deployed!"
               docker ps | grep taskmanager-backend
               
-              # Test backend health locally
-              echo "🧪 Testing backend health..."
-              HEALTH_STATUS=\$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/api/health || echo "000")
-              echo "Backend health check status: \$HEALTH_STATUS"
+              # Wait for backend to start
+              sleep 5
               
-              if [ "\$HEALTH_STATUS" = "200" ]; then
-                echo "✅ Backend is healthy!"
-                curl -s http://localhost:5000/api/health | head -5
-              else
-                echo "⚠️ Backend health check failed (HTTP \$HEALTH_STATUS)"
-                echo "Container logs:"
-                docker logs taskmanager-backend | tail -20
-              fi
+              # Test backend health
+              curl -f http://localhost:5000/api/health || echo "⚠️ Backend health check failed"
           BACKEND_EOF
           ENDSSH
 

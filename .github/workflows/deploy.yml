@@ -285,12 +285,12 @@ jobs:
           
           ssh -i ~/.ssh/task-manager-key.pem \
             -o StrictHostKeyChecking=no \
-            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} << ENDSSH
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} << 'ENDSSH'
             set -e
             
             echo "🔐 Logging into ECR..."
             aws ecr get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin \$(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
+              docker login --username AWS --password-stdin $(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
             
             echo "📥 Pulling Frontend image: $FRONTEND_IMAGE"
             docker pull $FRONTEND_IMAGE
@@ -329,20 +329,20 @@ jobs:
             # Create Nginx config with proper variable expansion
             sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null <<'EOF'
            upstream frontend_app {
-          server localhost:3000;
-          }
+           server localhost:3000;
+             }
 
           upstream backend_app {
             server $BACKEND_IP:5000;
-            }
+           }
 
-          server {
-          listen 80 default_server;
-          listen [::]:80 default_server;
-          server_name _;
+           server {
+           listen 80 default_server;
+           listen [::]:80 default_server;
+           server_name _;
 
           location / {
-           proxy_pass http://frontend_app;
+          proxy_pass http://frontend_app;
           proxy_http_version 1.1;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection 'upgrade';
@@ -350,20 +350,20 @@ jobs:
           proxy_cache_bypass $http_upgrade;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          }
+           }
 
           location /api/ {
            proxy_pass http://backend_app/api/;
-           proxy_http_version 1.1;
-           proxy_set_header Host $host;
-           proxy_set_header X-Real-IP $remote_addr;
-           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           proxy_connect_timeout 60s;
           proxy_send_timeout 60s;
           proxy_read_timeout 60s;
+           }
           }
-          }
-          EOF
+            EOF
             
             # Replace $BACKEND_IP with actual value
             sudo sed -i "s/\$BACKEND_IP/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
@@ -391,7 +391,7 @@ jobs:
             echo "  Container: $(docker ps --filter name=taskmanager-frontend --format '{{.ID}}')"
             echo "  Frontend :3000: $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
             echo "  Nginx proxy: $(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
-          ENDSSH
+        ENDSSH
 
       - name: Verify Frontend Deployment
         run: |

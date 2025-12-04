@@ -306,17 +306,31 @@ jobs:
               -p 3000:80 \
               $FRONTEND_IMAGE
             
+            # Wait for container to be healthy
+            echo "⏳ Waiting for container to be healthy..."
+            sleep 5
+            
+            # Verify container is running
+            if ! docker ps | grep -q taskmanager-frontend; then
+              echo "❌ Container failed to start"
+              docker logs taskmanager-frontend
+              exit 1
+            fi
+            
             echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
+            
+            # Remove default HTML that interferes
+            sudo rm -f /var/www/html/index.html
             
             # Create Nginx configuration
             cat > /tmp/taskmanager.conf << 'NGINX_EOF'
-            upstream frontend {
-           server localhost:3000;
+          upstream frontend {
+          server localhost:3000;
            }
 
           upstream backend {
           server BACKEND_IP_PLACEHOLDER:5000;
-          }
+           }
 
           server {
           listen 80;
@@ -324,26 +338,26 @@ jobs:
     
           # Frontend
           location / {
-          proxy_pass http://frontend;
-          proxy_http_version 1.1;
-          proxy_set_header Upgrade $http_upgrade;
-          proxy_set_header Connection 'upgrade';
-          proxy_set_header Host $host;
-          proxy_cache_bypass $http_upgrade;
-          }
+           proxy_pass http://frontend;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection 'upgrade';
+           proxy_set_header Host $host;
+           proxy_cache_bypass $http_upgrade;
+           }
     
-          # Backend API - IP dynamique récupérée depuis CloudFormation
-          location /api/ {
-           proxy_pass http://backend/api/;
+           # Backend API - IP dynamique récupérée depuis CloudFormation
+            location /api/ {
+            proxy_pass http://backend/api/;
             proxy_http_version 1.1;
-            proxy_set_header Host $host;
+             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 60s;
+           proxy_connect_timeout 60s;
+           proxy_send_timeout 60s;
             proxy_read_timeout 60s;
             }
-          }
+           }
           NGINX_EOF
             
             # Replace placeholder with actual backend IP
@@ -475,7 +489,8 @@ jobs:
               docker pull $BACKEND_IMAGE
               
               echo "🛑 Stopping old container..."
-              docker rm -f taskmanager-backend 2>/dev/null || true
+              docker stop taskmanager-backend 2>/dev/null || true
+              docker rm taskmanager-backend 2>/dev/null || true
               
               echo "🚀 Starting new Backend container..."
               docker run -d \

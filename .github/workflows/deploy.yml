@@ -296,8 +296,7 @@ jobs:
             docker pull $FRONTEND_IMAGE
             
             echo "🛑 Stopping old container..."
-            docker stop taskmanager-frontend 2>/dev/null || true
-            docker rm taskmanager-frontend 2>/dev/null || true
+            docker rm -f taskmanager-frontend 2>/dev/null || true
             
             echo "🚀 Starting new Frontend container..."
             docker run -d \

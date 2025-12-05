@@ -3,7 +3,7 @@ import './App.css';
 
 // Détecter l'environnement
 const API_URL = window.location.hostname === 'localhost'
-    ? 'http://44.193.29.228/api'  // En dev local, pointer vers EC2
+    ? 'http://100.27.38.124/api'  // En dev local, pointer vers EC2
     : '/api';  // En production, utiliser le proxy Nginx
 
 function App() {

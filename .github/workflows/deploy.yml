@@ -190,107 +190,53 @@ jobs:
       - name: Construct Image URLs
         id: image-urls
         run: |
-          # Get ECR registry from AWS account
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
-          
-          # Construct image URLs
           FRONTEND_IMAGE="$ECR_REGISTRY/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
-          BACKEND_IMAGE="$ECR_REGISTRY/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
-          
           echo "frontend_image=$FRONTEND_IMAGE" >> $GITHUB_OUTPUT
-          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
-          
-          echo "📦 Image URLs:"
-          echo "Frontend: $FRONTEND_IMAGE"
-          echo "Backend: $BACKEND_IMAGE"
+          echo "📦 Frontend Image: $FRONTEND_IMAGE"
 
-      - name: Get Frontend IP
-        id: get-ip
+      - name: Get IPs
+        id: get-ips
         run: |
           FRONTEND_IP=$(aws cloudformation describe-stacks \
             --stack-name TaskManager-compute \
             --region ${{ env.AWS_REGION }} \
             --query 'Stacks[0].Outputs[?OutputKey==`FrontendPublicIP`].OutputValue' \
             --output text)
-          echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
-          echo "✅ Frontend IP: $FRONTEND_IP"
-
-      - name: Setup SSH Key
-        run: |
-          echo "🔑 Setting up SSH key..."
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          
-          # Decode base64 key
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}" | base64 -d > ~/.ssh/task-manager-key.pem
-          chmod 600 ~/.ssh/task-manager-key.pem
-          
-          # Validate key
-          if ! grep -q "BEGIN RSA PRIVATE KEY" ~/.ssh/task-manager-key.pem; then
-            echo "❌ SSH key decode failure"
-            exit 1
-          fi
-          
-          # Add host to known_hosts
-          ssh-keyscan -H ${{ steps.get-ip.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
-          echo "✅ SSH key configured"
-
-      - name: Debug - Verify Image URLs
-        run: |
-          echo "🔍 Debugging Image URLs..."
-          echo "Step output - Frontend: ${{ steps.build-frontend.outputs.image }}"
-          echo "Step output - Backend: ${{ steps.build-backend.outputs.image }}"
-          echo "Job output - Frontend: ${{ needs.build-and-push.outputs.frontend_image }}"
-          echo "Job output - Backend: ${{ needs.build-and-push.outputs.backend_image }}"
-          echo ""
-          echo "Building image URLs from env vars..."
-          FRONTEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
-          BACKEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
-          echo "Constructed Frontend: $FRONTEND_IMG"
-          echo "Constructed Backend: $BACKEND_IMG"
-          
-          # Use job outputs if available, otherwise construct from env
-          if [ ! -z "${{ needs.build-and-push.outputs.frontend_image }}" ]; then
-            echo "✅ Using job output for frontend"
-          else
-            echo "⚠️  Job output empty, will use constructed URL"
-          fi
-
-      - name: Get Backend IP
-        id: get-backend-ip
-        run: |
-          echo "🔍 Fetching Backend IP from CloudFormation..."
           BACKEND_IP=$(aws cloudformation describe-stacks \
             --stack-name TaskManager-compute \
             --region ${{ env.AWS_REGION }} \
             --query 'Stacks[0].Outputs[?OutputKey==`BackendPrivateIP`].OutputValue' \
             --output text)
+          echo "frontend_ip=$FRONTEND_IP" >> $GITHUB_OUTPUT
           echo "backend_ip=$BACKEND_IP" >> $GITHUB_OUTPUT
+          echo "✅ Frontend IP: $FRONTEND_IP"
           echo "✅ Backend IP: $BACKEND_IP"
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY_B64 }}" | base64 -d > ~/.ssh/task-manager-key.pem
+          chmod 600 ~/.ssh/task-manager-key.pem
+          ssh-keyscan -H ${{ steps.get-ips.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy Frontend Container
         env:
           FRONTEND_IMAGE: ${{ steps.image-urls.outputs.frontend_image }}
-          BACKEND_IP: ${{ steps.get-backend-ip.outputs.backend_ip }}
+          BACKEND_IP: ${{ steps.get-ips.outputs.backend_ip }}
         run: |
           echo "🚀 Deploying Frontend container..."
           echo "📦 Frontend Image: $FRONTEND_IMAGE"
           echo "🔗 Backend IP: $BACKEND_IP"
           
-          if [ -z "$FRONTEND_IMAGE" ]; then
-            echo "❌ Frontend image URL is empty!"
-            exit 1
-          fi
-          
-          # Pass variables to SSH session
           ssh -i ~/.ssh/task-manager-key.pem \
             -o StrictHostKeyChecking=no \
-            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} \
+            ec2-user@${{ steps.get-ips.outputs.frontend_ip }} \
             bash -s "$FRONTEND_IMAGE" "$BACKEND_IP" << 'ENDSSH'
             set -e
             
-            # Receive arguments
             FRONTEND_IMAGE="$1"
             BACKEND_IP="$2"
             
@@ -298,7 +244,7 @@ jobs:
             aws ecr get-login-password --region us-east-1 | \
               docker login --username AWS --password-stdin $(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
             
-            echo "📥 Pulling Frontend image: $FRONTEND_IMAGE"
+            echo "📥 Pulling Frontend image..."
             docker pull $FRONTEND_IMAGE
             
             echo "🛑 Stopping old container..."
@@ -312,92 +258,81 @@ jobs:
               -p 3000:80 \
               $FRONTEND_IMAGE
             
-            # Wait for container to be healthy
-            echo "⏳ Waiting for container to be healthy..."
             sleep 5
             
-            # Verify container is running
             if ! docker ps | grep -q taskmanager-frontend; then
               echo "❌ Container failed to start"
               docker logs taskmanager-frontend
               exit 1
             fi
             
-            echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
+            echo "🔄 Configuring Nginx..."
             
-            # Remove default HTML that interferes
-            sudo rm -f /var/www/html/index.html
-            
-            # Disable default Nginx configs
-            sudo mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.disabled 2>/dev/null || true
-            sudo mv /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/default.disabled 2>/dev/null || true
-            
-            # Backup and clean main nginx.conf
+            # Backup original config
             if [ ! -f /etc/nginx/nginx.conf.original ]; then
               sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.original
             fi
             
-            # Create a clean nginx.conf without any server blocks
+            # Create clean main config
             sudo bash -c 'cat > /etc/nginx/nginx.conf' << 'NGINX_MAIN_EOF'
-           user nginx;
-           worker_processes auto;
-          error_log /var/log/nginx/error.log notice;
-           pid /run/nginx.pid;
+             user nginx;
+              worker_processes auto;
+              error_log /var/log/nginx/error.log notice;
+              pid /run/nginx.pid;
 
-          events {
-            worker_connections 1024;
+           events {
+           worker_connections 1024;
             }
 
           http {
-           include /etc/nginx/mime.types;
-          default_type application/octet-stream;
-
-          log_format main '$remote_addr - $remote_user [$time_local] "$request" '
-                    '$status $body_bytes_sent "$http_referer" '
+            include /etc/nginx/mime.types;
+             default_type application/octet-stream;
+             log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                     '$status $body_bytes_sent "$http_referer" '
                     '"$http_user_agent" "$http_x_forwarded_for"';
-
-          access_log /var/log/nginx/access.log main;
-
-          sendfile on;
-          tcp_nopush on;
-          keepalive_timeout 65;
-          types_hash_max_size 4096;
-
-          # Include all conf files from conf.d
-          include /etc/nginx/conf.d/*.conf;
-          }
-          NGINX_MAIN_EOF
+                  access_log /var/log/nginx/access.log main;
+            sendfile on;
+            tcp_nopush on;
+            keepalive_timeout 65;
+            types_hash_max_size 4096;
+           include /etc/nginx/conf.d/*.conf;
+             }
+             NGINX_MAIN_EOF
             
-            # Create the application-specific config
+            # Remove old configs
+            sudo rm -f /etc/nginx/conf.d/default.conf
+            sudo rm -f /etc/nginx/conf.d/*.disabled
+            
+            # Create app config
             sudo bash -c "cat > /etc/nginx/conf.d/taskmanager.conf" <<EOF
-           upstream frontend_app {
-            server localhost:3000;
-          }
-
-          upstream backend_app {
-          server ${BACKEND_IP}:5000;
+            upstream frontend_app {
+           server localhost:3000;
             }
 
+              upstream backend_app {
+           server ${BACKEND_IP}:5000;
+             }
+
           server {
-           listen 80 default_server;
+          listen 80 default_server;
            listen [::]:80 default_server;
-             server_name _;
+           server_name _;
 
-            location / {
+           location / {
            proxy_pass http://frontend_app;
-           proxy_http_version 1.1;
-           proxy_set_header Upgrade \$http_upgrade;
-           proxy_set_header Connection 'upgrade';
-           proxy_set_header Host \$host;
+              proxy_http_version 1.1;
+             proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host \$host;
            proxy_cache_bypass \$http_upgrade;
-          proxy_set_header X-Real-IP \$remote_addr;
-          proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto \$scheme;
-          }
+            proxy_set_header X-Real-IP \$remote_addr;
+           proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto \$scheme;
+             }
 
-          location /api/ {
-          proxy_pass http://backend_app/api/;
-          proxy_http_version 1.1;
+             location /api/ {
+           proxy_pass http://backend_app/api/;
+           proxy_http_version 1.1;
           proxy_set_header Host \$host;
           proxy_set_header X-Real-IP \$remote_addr;
           proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -405,48 +340,48 @@ jobs:
           proxy_connect_timeout 60s;
           proxy_send_timeout 60s;
           proxy_read_timeout 60s;
-           }
             }
-           EOF
-            
-            echo "✅ Nginx configuration created"
-            
-            # Show the final config for debugging
-            echo "📄 Final Nginx configuration:"
-            sudo cat /etc/nginx/conf.d/taskmanager.conf
+          }
+          EOF
             
             echo "🧪 Testing Nginx configuration..."
             if ! sudo nginx -t; then
               echo "❌ Nginx test failed"
-              echo "=== Main nginx.conf ==="
-              sudo cat /etc/nginx/nginx.conf
-              echo "=== taskmanager.conf ==="
               sudo cat /etc/nginx/conf.d/taskmanager.conf
               exit 1
             fi
             
             echo "🔄 Reloading Nginx..."
             sudo systemctl reload nginx
-            
             sleep 3
             
+            echo "🧪 Testing connectivity..."
+            FRONTEND_STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)
+            NGINX_STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost)
+            
             echo "✅ Deployment complete!"
-            echo "  Container: $(docker ps --filter name=taskmanager-frontend --format '{{.ID}}')"
-            echo "  Frontend :3000: $(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000)"
-            echo "  Nginx proxy: $(curl -s -o /dev/null -w '%{http_code}' http://localhost)"
-          ENDSSH
+            echo "  Frontend :3000 → HTTP $FRONTEND_STATUS"
+            echo "  Nginx :80 → HTTP $NGINX_STATUS"
+            
+            if [ "$NGINX_STATUS" != "200" ]; then
+              echo "⚠️ Nginx not returning 200, checking logs..."
+              sudo tail -5 /var/log/nginx/error.log
+            fi
+           ENDSSH
 
       - name: Verify Frontend Deployment
         run: |
           echo "🔍 Verifying Frontend deployment..."
           sleep 10
           
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ip.outputs.frontend_ip }})
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ips.outputs.frontend_ip }})
+          echo "HTTP Status: $STATUS"
           
           if [ "$STATUS" -eq 200 ]; then
             echo "✅ Frontend is accessible (HTTP $STATUS)"
           else
             echo "❌ Frontend returned HTTP $STATUS"
+            curl -I http://${{ steps.get-ips.outputs.frontend_ip }}
             exit 1
           fi
 

@@ -60,8 +60,9 @@ Resources:
           
           # Update system
           dnf update -y
-           # ==================== INSTALL DOCKER ====================
-          echo "2. Installing Docker..."
+          
+          # ==================== INSTALL DOCKER ====================
+          echo "Installing Docker..."
           dnf install -y docker
           
           # Start and enable Docker
@@ -76,26 +77,23 @@ Resources:
           echo "✅ Docker installed successfully"
           
           # Install Docker Compose
-          echo "3. Installing Docker Compose..."
+          echo "Installing Docker Compose..."
           curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
             -o /usr/local/bin/docker-compose
           chmod +x /usr/local/bin/docker-compose
           docker-compose --version
           
-          # Install Node.js 20
-          curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-          dnf install -y nodejs
-          
           # Install Nginx
           dnf install -y nginx
           
-          # Install Git
-          dnf install -y git
+          # Install Git and AWS CLI
+          dnf install -y git aws-cli
           
-          # Install PM2 globally
-          npm install -g pm2
+          # ==================== CONFIGURE NGINX FOR DOCKER ====================
+          # Remove default Nginx configuration
+          rm -f /etc/nginx/nginx.conf
           
-          # Configure Nginx
+          # Create minimal Nginx configuration
           cat > /etc/nginx/nginx.conf <<'EOF'
           user nginx;
           worker_processes auto;
@@ -122,47 +120,32 @@ Resources:
               include             /etc/nginx/mime.types;
               default_type        application/octet-stream;
 
-              server {
-                  listen       80;
-                  server_name  _;
-                  root         /var/www/html;
-
-                  location / {
-                      try_files $uri $uri/ /index.html;
-                  }
-
-                  location /api/ {
-                      proxy_pass http://${BackendInstance.PrivateIp}:5000/api/;
-                      proxy_http_version 1.1;
-                      proxy_set_header Host $host;
-                      proxy_set_header X-Real-IP $remote_addr;
-                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  }
+              # Include all configuration files from conf.d
+              include /etc/nginx/conf.d/*.conf;
+          }
+          EOF
+          
+          # Create directory for custom configs
+          mkdir -p /etc/nginx/conf.d
+          
+          # Create placeholder configuration (will be replaced by deploy.yml)
+          cat > /etc/nginx/conf.d/taskmanager.conf <<'EOF'
+          server {
+              listen 80 default_server;
+              server_name _;
+              
+              location / {
+                  return 503 "Application is being deployed. Please wait...";
+                  add_header Content-Type text/plain;
               }
           }
           EOF
           
-          # Create web directory
-          mkdir -p /var/www/html
-          
-          # Create a simple index page
-          cat > /var/www/html/index.html <<'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>Task Manager - Frontend</title>
-          </head>
-          <body>
-              <h1>Task Manager Frontend</h1>
-              <p>Frontend is ready! Deploy your React app here.</p>
-          </body>
-          </html>
-          EOF
-          
           # Set permissions
-          chown -R nginx:nginx /var/www/html
+          chown -R nginx:nginx /etc/nginx
           
-          # Start and enable Nginx
+          # Test and start Nginx
+          nginx -t
           systemctl start nginx
           systemctl enable nginx
           
@@ -215,6 +198,7 @@ Resources:
           
           # Signal completion
           echo "Frontend instance setup completed!"
+          echo "Ready for Docker container deployment via CI/CD"
       
       Tags:
         - Key: Name

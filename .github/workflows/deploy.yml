@@ -236,27 +236,6 @@ jobs:
           ssh-keyscan -H ${{ steps.get-ip.outputs.frontend_ip }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "✅ SSH key configured"
 
-      - name: Debug - Verify Image URLs
-        run: |
-          echo "🔍 Debugging Image URLs..."
-          echo "Step output - Frontend: ${{ steps.build-frontend.outputs.image }}"
-          echo "Step output - Backend: ${{ steps.build-backend.outputs.image }}"
-          echo "Job output - Frontend: ${{ needs.build-and-push.outputs.frontend_image }}"
-          echo "Job output - Backend: ${{ needs.build-and-push.outputs.backend_image }}"
-          echo ""
-          echo "Building image URLs from env vars..."
-          FRONTEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}"
-          BACKEND_IMG="${{ needs.build-and-push.outputs.ecr_registry }}/${{ env.BACKEND_IMAGE_NAME }}:${{ github.sha }}"
-          echo "Constructed Frontend: $FRONTEND_IMG"
-          echo "Constructed Backend: $BACKEND_IMG"
-          
-          # Use job outputs if available, otherwise construct from env
-          if [ ! -z "${{ needs.build-and-push.outputs.frontend_image }}" ]; then
-            echo "✅ Using job output for frontend"
-          else
-            echo "⚠️  Job output empty, will use constructed URL"
-          fi
-
       - name: Get Backend IP
         id: get-backend-ip
         run: |
@@ -285,74 +264,99 @@ jobs:
           
           ssh -i ~/.ssh/task-manager-key.pem \
             -o StrictHostKeyChecking=no \
-            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} << ENDSSH
+            ec2-user@${{ steps.get-ip.outputs.frontend_ip }} bash << ENDSSH
             set -e
             
             echo "🔐 Logging into ECR..."
             aws ecr get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin \$(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
+              sudo docker login --username AWS --password-stdin \$(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
             
             echo "📥 Pulling Frontend image: $FRONTEND_IMAGE"
-            docker pull $FRONTEND_IMAGE
+            sudo docker pull $FRONTEND_IMAGE
             
             echo "🛑 Stopping old container..."
-            docker rm -f taskmanager-frontend 2>/dev/null || true
+            sudo docker stop taskmanager-frontend 2>/dev/null || true
+            sudo docker rm taskmanager-frontend 2>/dev/null || true
             
             echo "🚀 Starting new Frontend container..."
-            docker run -d \
+            sudo docker run -d \
               --name taskmanager-frontend \
               --restart unless-stopped \
               -p 3000:80 \
               $FRONTEND_IMAGE
             
+            echo "⏳ Waiting for container to be healthy..."
+            for i in {1..30}; do
+              if sudo docker ps | grep -q "healthy.*taskmanager-frontend"; then
+                echo "✅ Container is healthy!"
+                break
+              fi
+              echo "Waiting... (\$i/30)"
+              sleep 2
+            done
+            
             echo "🔄 Updating Nginx configuration with Backend IP: $BACKEND_IP"
+            
+            # Remove old configuration
+            sudo rm -f /etc/nginx/conf.d/taskmanager.conf
+            
+            # Create new Nginx configuration
             sudo tee /etc/nginx/conf.d/taskmanager.conf > /dev/null << 'NGINX_EOF'
-            upstream frontend {
-                server localhost:3000;
-            }
-            
-            upstream backend {
-                server BACKEND_IP_PLACEHOLDER:5000;
-            }
-            
-            server {
-                listen 80;
-                server_name _;
-                
-                # Frontend
-                location / {
-                    proxy_pass http://frontend;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade \$http_upgrade;
-                    proxy_set_header Connection 'upgrade';
-                    proxy_set_header Host \$host;
-                    proxy_cache_bypass \$http_upgrade;
-                }
-                
-                # Backend API - IP dynamique récupérée depuis CloudFormation
-                location /api/ {
-                    proxy_pass http://backend/api/;
-                    proxy_http_version 1.1;
-                    proxy_set_header Host \$host;
-                    proxy_set_header X-Real-IP \$remote_addr;
-                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                    proxy_connect_timeout 60s;
-                    proxy_send_timeout 60s;
-                    proxy_read_timeout 60s;
-                }
-            }
-            NGINX_EOF
+          upstream frontend {
+              server localhost:3000;
+          }
+          
+          upstream backend {
+              server BACKEND_IP_PLACEHOLDER:5000;
+          }
+          
+          server {
+              listen 80 default_server;
+              server_name _;
+              
+              # Frontend - Proxy to Docker container on port 3000
+              location / {
+                  proxy_pass http://frontend;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_cache_bypass \$http_upgrade;
+              }
+              
+              # Backend API
+              location /api/ {
+                  proxy_pass http://backend/api/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_connect_timeout 60s;
+                  proxy_send_timeout 60s;
+                  proxy_read_timeout 60s;
+              }
+          }
+          NGINX_EOF
             
             # Replace placeholder with actual backend IP
             sudo sed -i "s/BACKEND_IP_PLACEHOLDER/$BACKEND_IP/g" /etc/nginx/conf.d/taskmanager.conf
             
             echo "✅ Nginx configuration updated"
             
+            # Test and reload Nginx
             sudo nginx -t
             sudo systemctl reload nginx
             
             echo "✅ Frontend container deployed!"
-            docker ps | grep taskmanager-frontend
+            sudo docker ps | grep taskmanager-frontend
+            
+            echo "🔍 Testing container directly..."
+            curl -s http://localhost:3000 | head -20
+            
+            echo "🔍 Testing via Nginx..."
+            curl -s http://localhost | head -20
           ENDSSH
 
       - name: Verify Frontend Deployment
@@ -360,6 +364,19 @@ jobs:
           echo "🔍 Verifying Frontend deployment..."
           sleep 10
           
+          # Test direct access
+          RESPONSE=$(curl -s http://${{ steps.get-ip.outputs.frontend_ip }})
+          
+          if echo "$RESPONSE" | grep -q "Task Manager\|React\|root"; then
+            echo "✅ Frontend is serving React application"
+          else
+            echo "❌ Frontend response doesn't look like React app"
+            echo "Response preview:"
+            echo "$RESPONSE" | head -20
+            exit 1
+          fi
+          
+          # Check HTTP status
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://${{ steps.get-ip.outputs.frontend_ip }})
           
           if [ "$STATUS" -eq 200 ]; then

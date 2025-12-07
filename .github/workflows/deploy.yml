@@ -31,7 +31,7 @@ jobs:
         run: |
           # Deploy si:
           # 1. Push direct sur main
-          # 2. PR mergée (pas juste fermée)
+          # 2. PR mergée 
           # 3. Déclenchement manuel
           
           if [[ "${{ github.event_name }}" == "push" ]]; then
@@ -176,20 +176,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
+      
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
+         
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
-
+        
       - name: Construct Image URLs
         id: image-urls
-        run: |
+        run: |   
           # Get ECR registry from AWS account
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"

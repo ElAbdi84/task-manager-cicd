@@ -275,8 +275,7 @@ jobs:
             sudo docker pull $FRONTEND_IMAGE
             
             echo "🛑 Stopping old container..."
-            sudo docker stop taskmanager-frontend 2>/dev/null || true
-            sudo docker rm taskmanager-frontend 2>/dev/null || true
+            sudo docker rm -f taskmanager-frontend 2>/dev/null || true
             
             echo "🚀 Starting new Frontend container..."
             sudo docker run -d \

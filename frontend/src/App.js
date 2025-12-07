@@ -111,7 +111,7 @@ function App() {
     return (
         <div className="App">
             <header className="app-header">
-                <h1>⚡ Task Manager Pro</h1>
+                <h1>⚡ Task Manager Pro update</h1>
                 <p>Gérez vos tâches avec style et efficacité</p>
             </header>
 
